@@ -1547,7 +1547,7 @@ function generateSisterDomains(domain) {
   }
 
   candidates.delete(norm);
-  return Array.from(candidates).slice(0, 8);
+  return Array.from(candidates).slice(0, 4);  // cap at 4: max 4 * 2.5s = 10s worst case
 }
 
 async function discoverCompanySisterDomainEmails(startUrl, companyKeywords, normalizeAndExtractEmailsFn) {
@@ -1564,7 +1564,7 @@ async function discoverCompanySisterDomainEmails(startUrl, companyKeywords, norm
           const res = await fetch(tUrl, {
             credentials: "omit",
             headers: STANDARD_FETCH_HEADERS,
-            signal: AbortSignal.timeout(4500)
+            signal: AbortSignal.timeout(2500)
           });
           if (res.ok) {
             const html = await res.text();
@@ -1940,10 +1940,12 @@ async function runProductionCrawl(crawlState) {
       htmlQueue.push(...normalSeeds.slice(0, maxPages - htmlQueue.length));
     }
   }
-  // Fire-and-forget: results flow into the queue while workers are already running
+  // Fire-and-forget: sitemap resolves while workers run; sitemapSettled flag
+  // tells workers they may now exit when queues are empty.
   const sitemapDiscoveryPromise = probeSitemaps(baseOrigin, crawlAbortController.signal)
     .then(ingestSitemapUrls)
-    .catch((smErr) => console.debug("Sitemap probe notice:", smErr));
+    .catch((smErr) => console.debug("Sitemap probe notice:", smErr))
+    .finally(() => { sitemapSettled = true; });
 
   // Deep URL Navigation Seeding:
   // When starting on deep subpages (e.g., e-catalogs, flipbooks, deep product views like /en/e-catalog-253/All-Electric-Precise-Plunger-Machine.html),
@@ -2395,24 +2397,25 @@ async function runProductionCrawl(crawlState) {
     return null;
   }
 
+  // sitemapSettled: set to true once probeSitemaps resolves.
+  // Workers must NOT exit until this is true – sitemap may inject URLs into queues.
+  let sitemapSettled = false;
+
   async function workerThread() {
     while (!crawlState.aborted && !allWorkCompleted) {
       const task = getNextTask();
       if (!task) {
-        if (activeWorkersCount > 0) {
-          // Other parallel workers are still fetching pages/PDFs (which may enqueue new work)
-          await new Promise((resolve) => setTimeout(resolve, 40));
+        if (activeWorkersCount > 0 || !sitemapSettled) {
+          // Either another worker may enqueue new work, or sitemap is still running.
+          await new Promise((resolve) => setTimeout(resolve, 50));
           continue;
-        } else {
-          // FIX Issue 2: Peek at queue lengths without consuming (shifting) a task.
-          // Calling getNextTask() here would silently remove a task from the queue with no worker to run it.
-          await new Promise((resolve) => setTimeout(resolve, 150));
-          const hasPendingWork = htmlQueue.length > 0 || pdfQueue.length > 0 || imageOcrQueue.length > 0;
-          if (hasPendingWork) continue;
-          if (activeWorkersCount > 0) continue;
-          allWorkCompleted = true;
-          break;
         }
+        // Grace period: one final peek after a short delay
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const hasPendingWork = htmlQueue.length > 0 || pdfQueue.length > 0 || imageOcrQueue.length > 0;
+        if (hasPendingWork || activeWorkersCount > 0 || !sitemapSettled) continue;
+        allWorkCompleted = true;
+        break;
       }
 
       activeWorkersCount++;
@@ -2439,24 +2442,18 @@ async function runProductionCrawl(crawlState) {
     workerPromises.push(workerThread());
   }
 
-  // FIX Issue 1b: Wait for the background sitemap discovery to finish before we
-  // evaluate whether work is done. It may inject new URLs after workers settle.
-  await sitemapDiscoveryPromise;
-
-  // If sitemap injected new work, run another mini-drain pass with same pool size
-  if (!crawlState.aborted && (htmlQueue.length > 0 || pdfQueue.length > 0 || imageOcrQueue.length > 0)) {
-    allWorkCompleted = false;
-    const drainPromises = [];
-    for (let w = 0; w < poolSize; w++) drainPromises.push(workerThread());
-    await Promise.all(drainPromises);
-  }
-
-  await Promise.all(workerPromises);
+  // Workers are running. Sitemap discovery runs in parallel.
+  // Once sitemaps resolve, any new URLs land in htmlQueue/pdfQueue where active workers pick them up.
+  // We wait for BOTH: (1) all workers done, (2) sitemap fully flushed.
+  await Promise.all([...workerPromises, sitemapDiscoveryPromise]);
 
   // ── Global Fallback: Sister Domain & Alternate TLD Company Probe ──
   // If no emails were discovered in static catalog/HTML pages (common on IndiaMART, TradeIndia, regional domains),
   // probe official sister domains (e.g. torquemasterindia.com -> torquemaster.in)
-  if (findings.length === 0 && !crawlState.aborted && !siteRestrictedRecord) {
+  // Sister domain probe: only run if truly zero findings AND no PDFs were queued
+  // (PDFs will be parsed by popup for emails after crawl completes).
+  // This prevents a 30-second phantom hang when the site puts emails only in PDFs.
+  if (findings.length === 0 && discoveredPdfs.length === 0 && !crawlState.aborted && !siteRestrictedRecord) {
     emitProgress({
       pagesCrawled: visitedUrls.size,
       pdfsCrawled: visitedPdfs.size,
@@ -2517,6 +2514,10 @@ async function runProductionCrawl(crawlState) {
     imageWarnings
   };
 }
+
+
+
+
 
 
 
