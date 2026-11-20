@@ -310,6 +310,14 @@ function safeAtob(b64) {
   return "";
 }
 
+function rot13(str) {
+  return String(str || "").replace(/[a-zA-Z]/g, (c) => {
+    const code = c.charCodeAt(0);
+    const base = code >= 97 ? 97 : 65;
+    return String.fromCharCode(((code - base + 13) % 26) + base);
+  });
+}
+
 function cleanEmailToken(str) {
   if (!str) return "";
   return String(str)
@@ -389,71 +397,92 @@ function normalizeAndExtractEmails(rawText) {
   const rawStr = String(rawText);
 
   // 1. Cloudflare Email Protection Deobfuscation
-  const cfEmailRegex = /(?:data-cfemail\s*=\s*["']?([0-9a-fA-F]{4,})["']?|\/cdn-cgi\/l\/email-protection(?:#|\?|%23)([0-9a-fA-F]{4,}))/gi;
+  const cfEmailRegex = /(?:data-cfemail\s*=\s*["']?([0-9a-fA-F]{4,})["']?|__cf_email__\s*=\s*["']?([0-9a-fA-F]{4,})["']?|\/cdn-cgi\/l\/email-protection(?:#|\?|%23)([0-9a-fA-F]{4,}))/gi;
   let cfMatch;
   while ((cfMatch = cfEmailRegex.exec(rawStr)) !== null) {
-    const hex = cfMatch[1] || cfMatch[2];
+    const hex = cfMatch[1] || cfMatch[2] || cfMatch[3];
     const decoded = decodeCloudflareEmail(hex);
     if (decoded) {
-      const clean = cleanEmailToken(decoded);
-      if (isValidEmail(clean)) found.add(clean);
+      const cleanDecoded = cleanEmailToken(decoded);
+      if (isValidEmail(cleanDecoded)) {
+        found.add(cleanDecoded);
+      }
     }
   }
 
-  // 2. Base64 Encoded Email Data Attributes
-  const b64AttrRegex = /\bdata-(?:email|mail|contact|encoded|cfemail)\s*=\s*["']([a-zA-Z0-9+/=]{8,120})["']/gi;
-  let b64Match;
-  while ((b64Match = b64AttrRegex.exec(rawStr)) !== null) {
-    const decoded = safeAtob(b64Match[1]);
-    if (decoded) {
-      const clean = cleanEmailToken(decoded);
-      if (isValidEmail(clean)) found.add(clean);
+  // 2. Data Attributes (Plain Text + Base64)
+  const dataAttrRegex = /\bdata-(?:email|mail|contact|encoded|address|mailto|recipient|user-email|cfemail)\s*=\s*["']([^"']{5,160})["']/gi;
+  let dataMatch;
+  while ((dataMatch = dataAttrRegex.exec(rawStr)) !== null) {
+    const val = dataMatch[1].trim();
+    if (val.includes("@")) {
+      const cleanVal = cleanEmailToken(val);
+      if (isValidEmail(cleanVal)) found.add(cleanVal);
+    }
+    if (/^[a-zA-Z0-9+/=]{6,160}$/.test(val) && !val.includes("@")) {
+      const decoded = safeAtob(val);
+      if (decoded) {
+        const cleanDecoded = cleanEmailToken(decoded);
+        if (isValidEmail(cleanDecoded)) found.add(cleanDecoded);
+      }
     }
   }
 
-  // 3. Hex / URL Encoded Mailto links
+  // 3. Split attributes: data-user="..." data-domain="..."
+  const userDomainRegex = /(?:data-(?:user|name|account|prefix)\s*=\s*["']([^"']+)["'][^>]*data-(?:domain|host|site)\s*=\s*["']([^"']+)["']|data-(?:domain|host|site)\s*=\s*["']([^"']+)["'][^>]*data-(?:user|name|account|prefix)\s*=\s*["']([^"']+)["'])/gi;
+  let udMatch;
+  while ((udMatch = userDomainRegex.exec(rawStr)) !== null) {
+    const user = (udMatch[1] || udMatch[4] || "").trim();
+    const dom = (udMatch[2] || udMatch[3] || "").trim();
+    if (user && dom) {
+      const candidate = cleanEmailToken(`${user}@${dom}`);
+      if (isValidEmail(candidate)) found.add(candidate);
+    }
+  }
+
+  // 4. Mailto links (supports multi-recipient and query string parameters)
   const mailtoRegex = /mailto:\s*([^\s"'<>]+)/gi;
   let mMatch;
   while ((mMatch = mailtoRegex.exec(rawStr)) !== null) {
     try {
-      const decodedMailto = decodeURIComponent(mMatch[1].split("?")[0]);
-      const addrs = decodedMailto.split(/[,;]+/);
+      const decodedMailto = decodeURIComponent(mMatch[1]);
+      const addrs = decodedMailto.split(/[?&,;]+/);
       for (const a of addrs) {
-        const clean = cleanEmailToken(a);
+        const val = a.includes("=") ? a.split("=")[1] : a;
+        const clean = cleanEmailToken(val);
         if (isValidEmail(clean)) found.add(clean);
       }
     } catch {}
   }
 
-  // 4. Decode HTML Entities (Numeric &#105;, Hex &#x69;)
+  // 5. JavaScript String Concatenation Deobfuscation & Anti-Spam Decoys
   let deobfuscated = rawStr
-    .replace(/&#(\d+);/g, (_, dec) => {
-      try {
-        return String.fromCharCode(parseInt(dec, 10));
-      } catch {
-        return "";
-      }
-    })
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
-      try {
-        return String.fromCharCode(parseInt(hex, 16));
-      } catch {
-        return "";
-      }
-    });
+    .replace(/["']\s*\+\s*["']/g, "")
+    .replace(/<(?:span|div|p|i|b|font)\b[^>]*\bstyle\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0|opacity\s*:\s*0)[^"']*["'][^>]*>[\s\S]*?<\/(?:span|div|p|i|b|font)>/gi, "")
+    .replace(/<(?:span|div|p|i|b|font)\b[^>]*\bclass\s*=\s*["'][^"']*(?:hidden|d-none|invisible|sr-only|honeypot|decoy|antispam|nospam|trap)[^"']*["'][^>]*>[\s\S]*?<\/(?:span|div|p|i|b|font)>/gi, "")
+    .replace(/<!--[\s\S]*?-->/g, "");
 
-  // 5. Decode URL escapes, Unicode escapes, and special AT/DOT symbols
+  // 6. Decode HTML Entities (Numeric &#105;, Hex &#x69;)
   deobfuscated = deobfuscated
+    .replace(/[\u00AD\u200B-\u200D\uFEFF\u2060]/g, "")
+    .replace(/&amp;#/gi, "&#")
+    .replace(/&amp;quot;/gi, '"')
+    .replace(/&amp;amp;/gi, "&")
+    .replace(/&#0*(\d+);?/g, (_, dec) => {
+      const code = parseInt(dec, 10);
+      return (code > 0 && code < 65536) ? String.fromCharCode(code) : "";
+    })
+    .replace(/&#x0*([0-9a-fA-F]+);?/g, (_, hex) => {
+      const code = parseInt(hex, 16);
+      return (code > 0 && code < 65536) ? String.fromCharCode(code) : "";
+    })
     .replace(/%40/gi, "@")
     .replace(/%2e/gi, ".")
-    .replace(/\\u0040/gi, "@")
-    .replace(/\\u002e/gi, ".")
+    .replace(/%2b/gi, "+")
+    .replace(/%2f/gi, "/")
     .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => {
-      try {
-        return String.fromCharCode(parseInt(hex, 16));
-      } catch {
-        return "";
-      }
+      const code = parseInt(hex, 16);
+      return (code > 0 && code < 65536) ? String.fromCharCode(code) : "";
     })
     .replace(/\\u002f/gi, "/")
     .replace(/\\"/g, '"')
@@ -461,12 +490,16 @@ function normalizeAndExtractEmails(rawText) {
     .replace(/&commat;/gi, "@")
     .replace(/&period;/gi, ".")
     .replace(/&minus;/gi, "-")
+    .replace(/&plus;/gi, "+")
+    .replace(/&lowbar;/gi, "_")
+    .replace(/&sol;/gi, "/")
+    .replace(/&(?:Tab|NewLine|nbsp|ensp|emsp|thinsp);/gi, " ")
     .replace(/[\uFF20\u00A9\u00AE]/g, "@")
     .replace(/[\uFF0E\u00B7\u2022]/g, ".")
     .replace(/[\u00A0\u2028\u2029]/g, " ")
     .replace(/mailto:\s*/gi, "");
 
-  // 6. Obfuscated AT and DOT patterns:
+  // 7. Obfuscated AT and DOT patterns:
   // ONLY convert explicit bracketed/symbolic forms ([at], (at), {at}, <at>, _at_, -at-, *at*, [@], (@))
   deobfuscated = deobfuscated
     .replace(/\s*[\(\[\{<]\s*(?:at|@|a\s+t)\s*[\)\]\}>]\s*/gi, "@")
@@ -485,7 +518,7 @@ function normalizeAndExtractEmails(rawText) {
     "$1@$2.$3"
   );
 
-  // 7. Strip tags both cleanly and with spaces
+  // 8. Strip tags both cleanly and with spaces
   const strippedClean = deobfuscated
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
     .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
@@ -496,7 +529,7 @@ function normalizeAndExtractEmails(rawText) {
     .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ");
 
-  // 8. Fix spaced emails (e.g. "daisyyang @ zungsung . com", "first . last @ sub . domain . co . uk")
+  // 9. Fix spaced emails (e.g. "daisyyang @ zungsung . com", "first . last @ sub . domain . co . uk")
   function fixSpacedEmails(str) {
     return str.replace(
       /\b([a-zA-Z0-9._%+-]+(?:\s*\.\s*[a-zA-Z0-9._%+-]+)*)\s*@\s*([a-zA-Z0-9-]+(?:\s*\.\s*[a-zA-Z0-9-]+)*\s*\.\s*[a-zA-Z]{2,24})\b/g,
@@ -527,11 +560,18 @@ function normalizeAndExtractEmails(rawText) {
     for (const token of tokens) {
       if (!token || !token.includes("@")) continue;
       const cleanT = cleanEmailToken(token);
-      if (isValidEmail(cleanT)) found.add(cleanT);
+      if (isValidEmail(cleanT)) {
+        found.add(cleanT);
+      } else {
+        const rotCandidate = rot13(cleanT);
+        if (isValidEmail(rotCandidate)) {
+          found.add(rotCandidate);
+        }
+      }
     }
   }
 
-  // 9. Check Reversed Emails (RTL / CSS bidi override: moc.elpmaxe@ofni -> info@example.com)
+  // 10. Check Reversed Emails (RTL / CSS bidi override: moc.elpmaxe@ofni -> info@example.com)
   const REVERSED_EMAIL_REGEX = /[a-zA-Z]{2,24}\.[a-zA-Z0-9.-]+@[a-zA-Z0-9._%+-]+[a-zA-Z0-9]/g;
   for (const textVer of normalizedTexts) {
     const revMatches = textVer.match(REVERSED_EMAIL_REGEX) || [];
@@ -1154,15 +1194,24 @@ function enqueueImageForProcessing(task) {
   processImageQueue();
 }
 
+const IMAGE_CONCURRENCY = 2;
 async function processImageQueue() {
   if (isProcessingImageQueue) return;
   isProcessingImageQueue = true;
 
-  while (imageProcessingQueue.length > 0) {
-    const task = imageProcessingQueue.shift();
-    if (!task || processedImageUrls.has(task.imageUrl)) continue;
-    processedImageUrls.add(task.imageUrl);
-    await handleProcessImageOcr(task);
+  const running = new Set();
+  while (imageProcessingQueue.length > 0 || running.size > 0) {
+    while (imageProcessingQueue.length > 0 && running.size < IMAGE_CONCURRENCY) {
+      const task = imageProcessingQueue.shift();
+      if (!task || processedImageUrls.has(task.imageUrl)) continue;
+      processedImageUrls.add(task.imageUrl);
+
+      const p = handleProcessImageOcr(task).finally(() => running.delete(p));
+      running.add(p);
+    }
+    if (running.size > 0) {
+      await Promise.race(running);
+    }
   }
 
   isProcessingImageQueue = false;
@@ -1238,6 +1287,8 @@ async function handleProcessImageOcr({ imageUrl, mainPageUrl, dataUrl, imageCont
         canvas.width = w;
         canvas.height = h;
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
         ctx.drawImage(img, 0, 0, w, h);
         const hasTextClues = hasProbableTextInCanvas(canvas);
         visualResult = analyzeCanvasVisualContent(canvas);

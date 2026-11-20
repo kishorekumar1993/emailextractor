@@ -16,7 +16,7 @@ const IMAGE_EXT_REGEX = /\.(png|jpe?g|webp|bmp|tiff?)(\?.*)?$/i;
 const IGNORE_PATH_REGEX = /\/(?:cart|checkout|basket|my-account|wishlist|login|signin|signup|register|account|password|reset|auth|wp-admin|wp-json|xmlrpc|ajax|feed|rss|atom|cdn-cgi)(?:\/|$|\?)/i;
 
 // Priority high-value pages likely to contain company contact emails (multilingual + corporate + catalogs)
-const HIGH_PRIORITY_REGEX = /\/(?:contact(?:[-_]?(?:us|me|details))?|kontakt|contacto|contatti|contactos|contactus|about(?:[-_]?(?:us|me))?|reach[-_]?us|get[-_]?in[-_]?touch|feedback|inquiry|enquiry|support|customer[-_]?service|corporate|company|management|directors|leadership|who[-_]?we[-_]?are|team|staff|help|imprint|impressum|locations?|branches|offices?|find[-_]?us|where[-_]?to[-_]?buy|distributors?|dealers?|partners?|sales|order|service|faq|help[-_]?center|terms|privacy|legal|info|catalog|catalogue|e-catalog|brochure)(?:\/|$|\?|\.|\b)/i;
+const HIGH_PRIORITY_REGEX = /\/(?:contact(?:[-_]?(?:us|me|details))?|kontakt|contacto|contatti|contactos|contactus|contactenos|nous[-_]?contacter|fale[-_]?conosco|lianxi|guanyu|about(?:[-_]?(?:us|me))?|reach[-_]?us|get[-_]?in[-_]?touch|feedback|inquiry|enquiry|support|customer[-_]?service|corporate|company|company[-_]?profile|profile|overview|management|directors|leadership|who[-_]?we[-_]?are|team|staff|help|imprint|impressum|locations?|branches|offices?|headquarters|hq|factory|facilities|find[-_]?us|where[-_]?to[-_]?buy|distributors?|dealers?|partners?|sales|investors?|investor[-_]?relations|order|service|faq|help[-_]?center|terms|privacy|legal|info|catalog|catalogue|e-catalog|ecat|brochure|flipbook)(?:\/|$|\?|\.|\b)/i;
 
 const STANDARD_FETCH_HEADERS = {
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -39,11 +39,11 @@ const IMAGE_FETCH_HEADERS = {
   "Accept-Language": "en-US,en;q=0.9"
 };
 
-// Query parameters to strip for clean URL deduplication
+// Query parameters to strip for clean URL deduplication (preserves language/locale query params)
 const REDUNDANT_PARAMS = new Set([
   "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
   "fbclid", "gclid", "ref", "source", "_ga", "_gl", "mc_cid", "mc_eid",
-  "variant", "color", "colour", "size", "sku", "currency", "curr", "locale", "lang",
+  "variant", "color", "colour", "size", "sku", "currency", "curr",
   "qty", "quantity", "add-to-cart", "added-to-cart", "option", "selection",
   "sort", "sorted", "sort_by", "order", "orderby", "order_by", "dir", "direction",
   "filter", "filter_by", "view", "mode", "display", "limit", "per_page", "price",
@@ -461,6 +461,18 @@ function isCandidateImage(url, isFromImageElement = false, skipProductDetails = 
 // Check if a path is an individual product detail page
 function isProductDetailPage(pathname) {
   const path = pathname.replace(/\/+$/, "").toLowerCase();
+
+  // Corporate catalogs, brochures, and flipbooks should NEVER be excluded as individual product items
+  if (
+    path.includes("catalog") ||
+    path.includes("catalogue") ||
+    path.includes("brochure") ||
+    path.includes("flipbook") ||
+    path.includes("ecat") ||
+    path.includes("ecp")
+  ) {
+    return false;
+  }
 
   const listingPages = new Set([
     "", "/", "/products", "/product", "/shop", "/store", "/collections",
@@ -964,6 +976,14 @@ function safeAtob(b64) {
   return "";
 }
 
+function rot13(str) {
+  return String(str || "").replace(/[a-zA-Z]/g, (c) => {
+    const code = c.charCodeAt(0);
+    const base = code >= 97 ? 97 : 65;
+    return String.fromCharCode(((code - base + 13) % 26) + base);
+  });
+}
+
 function cleanEmailToken(str) {
   if (!str) return "";
   return String(str)
@@ -1101,10 +1121,26 @@ function normalizeAndExtractEmails(rawText) {
     if (isValidEmail(em)) found.add(em);
   }
 
-  // 4. Remove honeypot / hidden DOM elements
+  // 3b. Mailto links (supports multi-recipient and query string parameters)
+  const mailtoRegex = /mailto:\s*([^\s"'<>]+)/gi;
+  let mMatch;
+  while ((mMatch = mailtoRegex.exec(rawStr)) !== null) {
+    try {
+      const decodedMailto = decodeURIComponent(mMatch[1]);
+      const addrs = decodedMailto.split(/[?&,;]+/);
+      for (const a of addrs) {
+        const val = a.includes("=") ? a.split("=")[1] : a;
+        const clean = cleanEmailToken(val);
+        if (isValidEmail(clean)) found.add(clean);
+      }
+    } catch {}
+  }
+
+  // 4. Remove honeypot / hidden DOM elements & Deobfuscate JS string concatenations
   let deobfuscated = rawStr
+    .replace(/["']\s*\+\s*["']/g, "")
     .replace(/<(?:span|div|p|i|b|font)\b[^>]*\bstyle\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0|opacity\s*:\s*0)[^"']*["'][^>]*>[\s\S]*?<\/(?:span|div|p|i|b|font)>/gi, "")
-    .replace(/<(?:span|div|p|i|b|font)\b[^>]*\bclass\s*=\s*["'][^"']*(?:hidden|d-none|invisible|sr-only|honeypot)[^"']*["'][^>]*>[\s\S]*?<\/(?:span|div|p|i|b|font)>/gi, "")
+    .replace(/<(?:span|div|p|i|b|font)\b[^>]*\bclass\s*=\s*["'][^"']*(?:hidden|d-none|invisible|sr-only|honeypot|decoy|antispam|nospam|trap)[^"']*["'][^>]*>[\s\S]*?<\/(?:span|div|p|i|b|font)>/gi, "")
     .replace(/<!--[\s\S]*?-->/g, "");
 
   // 5. Decode Entities, Escapes, Soft Hyphens & Zero-Width characters
@@ -1200,7 +1236,14 @@ function normalizeAndExtractEmails(rawText) {
     for (const token of tokens) {
       if (!token || !token.includes("@")) continue;
       const cleanT = cleanEmailToken(token);
-      if (isValidEmail(cleanT)) found.add(cleanT);
+      if (isValidEmail(cleanT)) {
+        found.add(cleanT);
+      } else {
+        const rotCandidate = rot13(cleanT);
+        if (isValidEmail(rotCandidate)) {
+          found.add(rotCandidate);
+        }
+      }
     }
   }
 
@@ -1533,6 +1576,77 @@ async function discoverCompanySisterDomainEmails(startUrl, companyKeywords, norm
   }
 }
 
+// ─── Fast Sitemap & Robots.txt Discovery ─────────────────────────────
+// Discovers official site pages upfront without relying solely on DOM links
+async function probeSitemaps(baseOrigin) {
+  const discovered = [];
+  const sitemapEndpoints = [
+    `${baseOrigin}/sitemap.xml`,
+    `${baseOrigin}/sitemap_index.xml`,
+    `${baseOrigin}/robots.txt`
+  ];
+
+  for (const endpoint of sitemapEndpoints) {
+    try {
+      const res = await fetch(endpoint, {
+        credentials: "omit",
+        headers: { "Accept": "text/xml,application/xml,text/plain,*/*" },
+        signal: AbortSignal.timeout(2500)
+      });
+      if (!res.ok) continue;
+      const text = await res.text();
+      if (!text || text.length < 20) continue;
+
+      if (endpoint.endsWith("robots.txt")) {
+        const smMatches = text.match(/^\s*Sitemap:\s*(https?:\/\/[^\s]+)/gim);
+        if (smMatches) {
+          for (const sm of smMatches) {
+            const smUrl = sm.replace(/^\s*Sitemap:\s*/i, "").trim();
+            if (smUrl && !sitemapEndpoints.includes(smUrl)) {
+              sitemapEndpoints.push(smUrl);
+            }
+          }
+        }
+        continue;
+      }
+
+      // Check for sitemap index
+      const subSitemaps = text.match(/<sitemap>[\s\S]*?<loc>([^<]+)<\/loc>[\s\S]*?<\/sitemap>/gi);
+      if (subSitemaps && subSitemaps.length > 0) {
+        for (const s of subSitemaps.slice(0, 4)) {
+          const locMatch = s.match(/<loc>([^<]+)<\/loc>/i);
+          if (locMatch && locMatch[1]) {
+            try {
+              const subRes = await fetch(locMatch[1].trim(), {
+                credentials: "omit",
+                headers: { "Accept": "text/xml,application/xml,*/*" },
+                signal: AbortSignal.timeout(2000)
+              });
+              if (subRes.ok) {
+                const subText = await subRes.text();
+                const locs = subText.match(/<loc>([^<]+)<\/loc>/gi) || [];
+                for (const l of locs) {
+                  const u = l.replace(/<\/?loc>/gi, "").trim();
+                  if (u) discovered.push(u);
+                }
+              }
+            } catch {}
+          }
+        }
+      } else {
+        const locs = text.match(/<loc>([^<]+)<\/loc>/gi) || [];
+        for (const l of locs) {
+          const u = l.replace(/<\/?loc>/gi, "").trim();
+          if (u) discovered.push(u);
+        }
+      }
+
+      if (discovered.length > 0) break;
+    } catch {}
+  }
+  return discovered;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // 6. PRODUCTION CRAWLER EXECUTION CORE
 // ═══════════════════════════════════════════════════════════════════════
@@ -1554,6 +1668,24 @@ async function runProductionCrawl(crawlState) {
   const visitedUrls = new Set();
   const visitedPdfs = new Set();
   const visitedImages = new Set();
+
+  // Fast sitemap pre-discovery: seeds official corporate & catalog pages immediately
+  try {
+    const sitemapUrls = await probeSitemaps(baseOrigin);
+    for (const smUrl of sitemapUrls) {
+      const cUrl = cleanAndNormalizeUrl(smUrl, startUrl);
+      if (cUrl && isUrlInScope(cUrl, baseOrigin, baseHostname, includeSubdomains) && !enqueuedHtmlUrls.has(cUrl)) {
+        enqueuedHtmlUrls.add(cUrl);
+        if (HIGH_PRIORITY_REGEX.test(cUrl)) {
+          htmlQueue.unshift(cUrl);
+        } else if (htmlQueue.length < maxPages) {
+          htmlQueue.push(cUrl);
+        }
+      }
+    }
+  } catch (smErr) {
+    console.debug("Sitemap probe notice:", smErr);
+  }
 
   // Deep URL Navigation Seeding:
   // When starting on deep subpages (e.g., e-catalogs, flipbooks, deep product views like /en/e-catalog-253/All-Electric-Precise-Plunger-Machine.html),
@@ -1941,7 +2073,7 @@ async function runProductionCrawl(crawlState) {
         const res = await fetch(currentUrl, {
           credentials: "include",
           headers: STANDARD_FETCH_HEADERS,
-          signal: AbortSignal.timeout(6000)
+          signal: AbortSignal.timeout(4500)
         });
         if (!res.ok) return;
 
@@ -2090,10 +2222,11 @@ async function runProductionCrawl(crawlState) {
           continue;
         }
 
-        if (visitedUrls.size + htmlQueue.length < maxPages * 1.5) {
+        const isPriority = HIGH_PRIORITY_REGEX.test(cleanUrl);
+        if (isPriority || visitedUrls.size + htmlQueue.length < maxPages * 1.5) {
           enqueuedHtmlUrls.add(cleanUrl);
 
-          if (HIGH_PRIORITY_REGEX.test(cleanUrl)) {
+          if (isPriority) {
             htmlQueue.unshift(cleanUrl);
           } else {
             htmlQueue.push(cleanUrl);
