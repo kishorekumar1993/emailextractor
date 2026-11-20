@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════════════
 // Site & PDF Email Crawler — Production Background Service Worker
 // Fully MV3 Compliant | Robust Email Extraction | Multi-Source Tracking
 // Strict Visual & OCR Warning-Only Detection | Business Classifier
@@ -660,8 +660,8 @@ function extractImageContext(html, tagIndex) {
   
   const relevantSlice = lastSectionBreak !== -1 ? lookbackChunk.substring(lastSectionBreak) : lookbackChunk;
   return relevantSlice
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
-    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -908,8 +908,8 @@ function extractAllLinksAndText(html) {
   }
 
   const cleanHtml = html
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
-    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ");
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ");
 
   const text = cleanHtml.replace(/<[^>]+>/g, " ");
   return { text, rawLinks, directPdfCandidates };
@@ -1204,13 +1204,13 @@ function normalizeAndExtractEmails(rawText) {
 
   // 7. Strip tags both cleanly and with spaces
   const strippedClean = deobfuscated
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
-    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
     .replace(/<[^>]+>/g, "");
 
   const spacedClean = deobfuscated
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
-    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
     .replace(/<[^>]+>/g, " ");
 
   // 8. Fix spaced emails (e.g. "daisyyang @ zungsung . com", "first . last @ sub . domain . co . uk")
@@ -1610,11 +1610,16 @@ async function probeSitemaps(baseOrigin, abortSignal) {
   let fetched = 0;
   const MAX_FETCHES = 12;
 
+  // FIX Issue 5: Always enforce per-request timeout; fall back to AbortSignal.timeout
+  // when AbortSignal.any is unavailable so the crawl never hangs on a stalled request.
   function getSignal(ms) {
-    if (abortSignal && typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
-      return AbortSignal.any([AbortSignal.timeout(ms), abortSignal]);
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+      return abortSignal
+        ? AbortSignal.any([AbortSignal.timeout(ms), abortSignal])
+        : AbortSignal.timeout(ms);
     }
-    return abortSignal || AbortSignal.timeout(ms);
+    // Older Chrome builds: always use a plain timeout so requests do not hang forever
+    return AbortSignal.timeout(ms);
   }
 
   while (queue.length > 0 && fetched < MAX_FETCHES) {
@@ -1687,11 +1692,20 @@ async function runProductionCrawl(crawlState) {
   const crawlAbortController = new AbortController();
   crawlState.abortController = crawlAbortController;
 
+  // FIX Issue 7 (createFetchSignal): Always enforce timeout. Without it, stalled fetches
+  // block a worker thread until the MV3 service worker is killed by Chrome.
   function createFetchSignal(timeoutMs = 4500) {
     if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
       return AbortSignal.any([AbortSignal.timeout(timeoutMs), crawlAbortController.signal]);
     }
-    return crawlAbortController.signal;
+    // Fallback: compose a manual abort controller that fires on timeout OR crawl abort
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const onCrawlAbort = () => { clearTimeout(timer); ctrl.abort(); };
+    crawlAbortController.signal.addEventListener("abort", onCrawlAbort, { once: true });
+    ctrl.signal.addEventListener("abort", () =>
+      crawlAbortController.signal.removeEventListener("abort", onCrawlAbort), { once: true });
+    return ctrl.signal;
   }
 
   const initialUrl = cleanAndNormalizeUrl(startUrl, startUrl);
@@ -1877,14 +1891,26 @@ async function runProductionCrawl(crawlState) {
     }
   }
 
-  // Fast sitemap pre-discovery: seeds official corporate & catalog pages immediately
-  // CRITICAL FIX: Filters out PDF and image URLs directly into their respective queues
-  // and batches queue additions to eliminate O(n²) synchronous unshift freeze
-  try {
-    const sitemapUrls = await probeSitemaps(baseOrigin, crawlAbortController.signal);
+  // Emit first progress immediately so the popup shows "Crawling..." right away
+  emitProgress({
+    pagesCrawled: 0,
+    pdfsCrawled: 0,
+    pdfsAvailable: 0,
+    imagesScanned: 0,
+    queueRemaining: htmlQueue.length,
+    currentUrl: initialUrl,
+    findingsCount: 0,
+    discoveredPdfsCount: 0,
+    discoveredImagesCount: 0
+  });
+
+  // FIX Issue 1: Sitemap discovery runs in background (non-blocking).
+  // Workers start immediately on the seed URL; sitemap results feed into the queues
+  // as they arrive, so the user sees progress within ~1 second of clicking Start.
+  function ingestSitemapUrls(sitemapUrls) {
+    if (!Array.isArray(sitemapUrls) || crawlState.aborted) return;
     const prioritySeeds = [];
     const normalSeeds = [];
-
     for (const smUrl of sitemapUrls) {
       if (crawlState.aborted) break;
       const cUrl = cleanAndNormalizeUrl(smUrl, startUrl);
@@ -1907,16 +1933,17 @@ async function runProductionCrawl(crawlState) {
         }
       }
     }
-
     if (prioritySeeds.length > 0) {
       htmlQueue.unshift(...prioritySeeds.slice(-500));
     }
     if (normalSeeds.length > 0 && htmlQueue.length < maxPages) {
       htmlQueue.push(...normalSeeds.slice(0, maxPages - htmlQueue.length));
     }
-  } catch (smErr) {
-    console.debug("Sitemap probe notice:", smErr);
   }
+  // Fire-and-forget: results flow into the queue while workers are already running
+  const sitemapDiscoveryPromise = probeSitemaps(baseOrigin, crawlAbortController.signal)
+    .then(ingestSitemapUrls)
+    .catch((smErr) => console.debug("Sitemap probe notice:", smErr));
 
   // Deep URL Navigation Seeding:
   // When starting on deep subpages (e.g., e-catalogs, flipbooks, deep product views like /en/e-catalog-253/All-Electric-Precise-Plunger-Machine.html),
@@ -2312,9 +2339,11 @@ async function runProductionCrawl(crawlState) {
         }
 
         const isPriority = HIGH_PRIORITY_REGEX.test(cleanUrl);
-        if (isPriority || visitedUrls.size + htmlQueue.length < maxPages * 1.5) {
+        // FIX Issue 6: Cap queue growth so priority URLs cannot bypass the maxPages limit
+        // indefinitely. Allow up to 20% headroom beyond maxPages for high-priority pages.
+        const queueCap = isPriority ? maxPages * 1.2 : maxPages;
+        if (visitedUrls.size + htmlQueue.length < queueCap) {
           enqueuedHtmlUrls.add(cleanUrl);
-
           if (isPriority) {
             htmlQueue.unshift(cleanUrl);
           } else {
@@ -2375,9 +2404,11 @@ async function runProductionCrawl(crawlState) {
           await new Promise((resolve) => setTimeout(resolve, 40));
           continue;
         } else {
-          // Grace period check: ensure no worker just finished before queue was populated
+          // FIX Issue 2: Peek at queue lengths without consuming (shifting) a task.
+          // Calling getNextTask() here would silently remove a task from the queue with no worker to run it.
           await new Promise((resolve) => setTimeout(resolve, 150));
-          if (getNextTask()) continue;
+          const hasPendingWork = htmlQueue.length > 0 || pdfQueue.length > 0 || imageOcrQueue.length > 0;
+          if (hasPendingWork) continue;
           if (activeWorkersCount > 0) continue;
           allWorkCompleted = true;
           break;
@@ -2400,11 +2431,24 @@ async function runProductionCrawl(crawlState) {
     }
   }
 
-  // Launch all workers in parallel immediately
+  // FIX Issue 4: Cap pool size at 6 to prevent OOM when PDF (25MB) + image (20MB) workers
+  // fire simultaneously. Workers still max out CPU on HTML which is cheap memory-wise.
   const workerPromises = [];
-  const poolSize = Math.max(1, concurrency || 8);
+  const poolSize = Math.min(6, Math.max(1, concurrency || 6));
   for (let w = 0; w < poolSize; w++) {
     workerPromises.push(workerThread());
+  }
+
+  // FIX Issue 1b: Wait for the background sitemap discovery to finish before we
+  // evaluate whether work is done. It may inject new URLs after workers settle.
+  await sitemapDiscoveryPromise;
+
+  // If sitemap injected new work, run another mini-drain pass with same pool size
+  if (!crawlState.aborted && (htmlQueue.length > 0 || pdfQueue.length > 0 || imageOcrQueue.length > 0)) {
+    allWorkCompleted = false;
+    const drainPromises = [];
+    for (let w = 0; w < poolSize; w++) drainPromises.push(workerThread());
+    await Promise.all(drainPromises);
   }
 
   await Promise.all(workerPromises);
@@ -2473,3 +2517,10 @@ async function runProductionCrawl(crawlState) {
     imageWarnings
   };
 }
+
+
+
+
+
+
+
