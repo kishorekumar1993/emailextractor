@@ -3,6 +3,7 @@
 
 <head>
   <meta charset="UTF-8" />
+  <title>Site & PDF Email Detector</title>
   <style>
     :root {
       --primary: #2563eb;
@@ -46,6 +47,25 @@
       padding-bottom: 8px;
       border-bottom: 1px solid var(--border);
       gap: 10px;
+    }
+
+    header h2 {
+      margin: 0;
+      font-size: 16px;
+      color: #1e293b;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .badge {
+      font-size: 10px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-weight: 600;
+      background: #eff6ff;
+      color: var(--primary);
+      border: 1px solid #bfdbfe;
     }
 
     .header-actions {
@@ -98,72 +118,49 @@
     .target-url-container {
       margin-bottom: 12px;
       background: var(--card-bg);
-      padding: 8px 10px;
-      border-radius: 6px;
       border: 1px solid var(--border);
+      padding: 10px;
+      border-radius: 8px;
     }
 
     .target-url-label {
       display: block;
-      font-size: 11px;
+      font-size: 12px;
       font-weight: 700;
-      color: var(--text-muted);
-      margin-bottom: 4px;
+      color: #334155;
+      margin-bottom: 6px;
     }
 
     .target-url-row {
       display: flex;
-      gap: 6px;
-      align-items: center;
+      gap: 8px;
     }
 
     .target-url-input {
       flex: 1;
-      padding: 6px 10px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
       font-size: 12px;
-      border: 1px solid #cbd5e1;
-      border-radius: 4px;
-      outline: none;
       font-family: monospace;
+      outline: none;
+      transition: border-color 0.15s;
     }
 
     .target-url-input:focus {
       border-color: var(--primary);
-    }
-
-    h2 {
-      margin: 0;
-      font-size: 16px;
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .badge {
-      font-size: 11px;
-      padding: 2px 7px;
-      border-radius: 9999px;
-      background: #e0e7ff;
-      color: #3730a3;
-      font-weight: 600;
-    }
-
-    .badge-ocr {
-      background: #dcfce7;
-      color: #166534;
+      box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
     }
 
     .options-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 8px;
+      gap: 10px;
       margin-bottom: 12px;
       background: var(--card-bg);
-      padding: 10px;
-      border-radius: 6px;
       border: 1px solid var(--border);
-      font-size: 12px;
+      padding: 10px;
+      border-radius: 8px;
     }
 
     .option-group {
@@ -173,99 +170,58 @@
     }
 
     .option-group label {
+      font-size: 11px;
       font-weight: 600;
       color: var(--text-muted);
     }
 
-    select,
-    input[type="number"],
-    input[type="text"] {
-      padding: 5px 8px;
-      border-radius: 4px;
-      border: 1px solid #cbd5e1;
+    select {
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
       font-size: 12px;
+      background: #fff;
       outline: none;
-    }
-
-    select:focus,
-    input:focus {
-      border-color: var(--primary);
+      color: var(--text);
     }
 
     .checkbox-col {
+      grid-column: span 2;
       display: flex;
       flex-direction: column;
       gap: 6px;
-      grid-column: span 2;
-      margin-top: 4px;
+      padding-top: 6px;
+      border-top: 1px dashed var(--border);
     }
 
     .checkbox-label {
-      display: flex;
+      display: inline-flex;
       align-items: center;
       gap: 6px;
+      font-size: 11px;
       cursor: pointer;
-      font-weight: normal !important;
-      color: var(--text) !important;
+      color: #334155;
+      user-select: none;
     }
 
     .actions-row {
       display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
       flex-wrap: wrap;
-      gap: 5px;
-      margin-bottom: 10px;
     }
 
     button {
-      padding: 6px 10px;
-      border-radius: 5px;
+      padding: 8px 12px;
+      border-radius: 6px;
       border: none;
+      font-size: 12px;
       font-weight: 600;
-      font-size: 11px;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
-      justify-content: center;
-      gap: 4px;
-      transition: background 0.15s ease;
-      white-space: nowrap;
-    }
-
-    .btn-primary {
-      background: var(--primary);
-      color: white;
-      flex: 1 1 120px;
-    }
-
-    .btn-primary:hover:not(:disabled) {
-      background: var(--primary-hover);
-    }
-
-    .btn-danger {
-      background: var(--danger);
-      color: white;
-    }
-
-    .btn-danger:hover:not(:disabled) {
-      background: var(--danger-hover);
-    }
-
-    .btn-highlight {
-      background: #10b981;
-      color: white;
-    }
-
-    .btn-highlight:hover:not(:disabled) {
-      background: #059669;
-    }
-
-    .btn-secondary {
-      background: #e2e8f0;
-      color: #334155;
-    }
-
-    .btn-secondary:hover:not(:disabled) {
-      background: #cbd5e1;
+      gap: 6px;
+      transition: all 0.15s;
     }
 
     button:disabled {
@@ -273,138 +229,95 @@
       cursor: not-allowed;
     }
 
+    .btn-primary {
+      background-color: var(--primary);
+      color: white;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background-color: var(--primary-hover);
+    }
+
+    .btn-danger {
+      background-color: var(--danger);
+      color: white;
+    }
+
+    .btn-danger:hover:not(:disabled) {
+      background-color: var(--danger-hover);
+    }
+
+    .btn-secondary {
+      background-color: #fff;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    .btn-secondary:hover:not(:disabled) {
+      background-color: #f1f5f9;
+      border-color: #cbd5e1;
+    }
+
     .stats-bar {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 6px;
-      margin-bottom: 10px;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin-bottom: 12px;
     }
 
     .stat-card {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 6px 8px;
+      border-radius: 8px;
+      padding: 8px;
       text-align: center;
-      cursor: pointer;
-    }
-
-    .stat-card:hover {
-      border-color: var(--primary);
     }
 
     .stat-val {
-      font-size: 14px;
+      font-size: 18px;
       font-weight: 700;
-      color: var(--primary);
+      color: var(--text);
     }
 
     .stat-lbl {
       font-size: 10px;
-      color: var(--text-muted);
-      text-transform: uppercase;
       font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-top: 2px;
     }
 
     .status-text {
       font-size: 11px;
       color: var(--text-muted);
+      margin-bottom: 10px;
+      font-style: italic;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      margin-bottom: 8px;
-      padding: 4px 8px;
-      background: #f1f5f9;
-      border-radius: 4px;
-    }
-
-    .ocr-status {
-      font-size: 11px;
-      color: #065f46;
-      background: #d1fae5;
-      padding: 4px 8px;
-      border-radius: 4px;
-      margin-bottom: 8px;
-      display: none;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .restriction-banner {
-      display: none;
-      align-items: center;
-      gap: 8px;
-      background: #fee2e2;
-      border: 1px solid #fca5a5;
-      color: #991b1b;
-      font-size: 11px;
-      font-weight: 600;
-      padding: 6px 10px;
-      border-radius: 5px;
-      margin-bottom: 8px;
-    }
-
-    .warnings-banner {
-      display: none;
-      align-items: center;
-      gap: 8px;
-      background: #fef3c7;
-      border: 1px solid #fcd34d;
-      color: #92400e;
-      font-size: 11px;
-      font-weight: 600;
-      padding: 5px 10px;
-      border-radius: 5px;
-      margin-bottom: 6px;
-    }
-
-    .type-warn {
-      background: #fef3c7;
-      color: #92400e;
-      font-weight: bold;
-    }
-
-    .warn-status {
-      color: #d97706;
-      font-weight: bold;
-      font-size: 10px;
-    }
-
-    .tabs-row {
-      display: flex;
-      gap: 4px;
-      margin-bottom: 8px;
-      border-bottom: 2px solid var(--border);
-    }
-
-    .tab-btn {
-      padding: 6px 12px;
-      background: transparent;
-      border: none;
-      border-bottom: 2px solid transparent;
-      margin-bottom: -2px;
-      font-weight: 600;
-      color: var(--text-muted);
-      cursor: pointer;
-      border-radius: 0;
-    }
-
-    .tab-btn.active {
-      color: var(--primary);
-      border-bottom-color: var(--primary);
-      background: transparent;
     }
 
     .search-box {
       width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 12px;
       margin-bottom: 8px;
+      background: #fff;
+      outline: none;
+    }
+
+    .search-box:focus {
+      border-color: var(--primary);
     }
 
     .table-container {
-      max-height: 250px;
+      max-height: 280px;
       overflow-y: auto;
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: 8px;
       background: var(--card-bg);
     }
 
@@ -416,7 +329,7 @@
 
     th,
     td {
-      padding: 6px 8px;
+      padding: 7px 10px;
       text-align: left;
       border-bottom: 1px solid var(--border);
       word-break: break-all;
@@ -433,7 +346,7 @@
 
     .type-badge {
       display: inline-block;
-      padding: 1px 5px;
+      padding: 2px 6px;
       border-radius: 4px;
       font-size: 10px;
       font-weight: bold;
@@ -442,12 +355,6 @@
     .type-pdf {
       background: #fee2e2;
       color: #991b1b;
-    }
-
-    .type-ocr {
-      background: #dcfce7;
-      color: #166534;
-      font-weight: bold;
     }
 
     .type-html {
@@ -460,25 +367,10 @@
       color: #92400e;
     }
 
-    .status-badge {
-      display: inline-block;
-      padding: 1px 6px;
-      border-radius: 4px;
-      font-size: 10px;
-      background: #f1f5f9;
-      color: #475569;
-    }
-
-    .status-badge.has-email {
-      background: #dcfce7;
-      color: #166534;
-      font-weight: bold;
-    }
-
     .source-link {
       color: var(--primary);
       text-decoration: none;
-      max-width: 145px;
+      max-width: 180px;
       display: inline-block;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -490,30 +382,21 @@
       text-decoration: underline;
     }
 
-    .main-site-link {
-      color: #0369a1;
-      font-weight: 600;
-      text-decoration: none;
-      max-width: 145px;
-      display: inline-block;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      vertical-align: middle;
-    }
-
-    .main-site-link:hover {
-      text-decoration: underline;
+    .empty-state {
+      padding: 30px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 12px;
     }
   </style>
 </head>
 
 <body>
   <header>
-    <h2>⚡ Site & PDF Crawler <span class="badge">Main Site URL Traceability</span> <span class="badge badge-ocr">OCR Enabled</span> <span id="windowModeBadge" class="badge" style="display:none; background:#ecfdf5; color:#047857;">🟢 Persistent Window</span></h2>
+    <h2>⚡ Site &amp; PDF Email Detector <span class="badge">Pure &amp; Ultra-Fast</span> <span id="windowModeBadge" class="badge" style="display:none; background:#ecfdf5; color:#047857;">🟢 Persistent Window</span></h2>
     <div class="header-actions">
       <button id="popoutWindowBtn" class="btn-popout" title="Open in persistent window that stays open while browsing other tabs">🗗 Keep Open (Window Mode)</button>
-      <button id="closeWindowBtn" class="btn-close-win" style="display:none;" title="Close this persistent window">❌ Close Window</button>
+      <button id="closeWindowBtn" class="btn-close-win" style="display:none;" title="Close this persistent window">✕ Close Window</button>
     </div>
   </header>
 
@@ -546,16 +429,8 @@
     </div>
     <div class="checkbox-col">
       <label class="checkbox-label">
-        <input type="checkbox" id="ocrImages" checked />
-        <strong>Scan text inside images & scanned PDFs (OCR)</strong>
-      </label>
-      <label class="checkbox-label">
         <input type="checkbox" id="checkPdfs" checked />
-        Review all links for available PDFs (Any domain: S3, CDN & local)
-      </label>
-      <label class="checkbox-label">
-        <input type="checkbox" id="skipProductDetails" checked />
-        <strong>Strictly exclude product & category images (Scan corporate & catalog images only)</strong>
+        <strong>Scan PDF documents for emails (Catalogs, brochures, spec sheets, certificates)</strong>
       </label>
       <label class="checkbox-label">
         <input type="checkbox" id="includeSubdomains" />
@@ -571,119 +446,54 @@
   <div class="actions-row">
     <button id="startBtn" class="btn-primary">▶ Crawl Website</button>
     <button id="stopBtn" class="btn-danger" style="display: none;">⏹ Stop</button>
-    <button id="copyAllUnifiedBtn" class="btn-highlight" disabled>📋 Copy All (Emails + PDFs + Images)</button>
-    <button id="copyPathBtn" class="btn-secondary" disabled>📋 Copy with Path</button>
     <button id="copyBtn" class="btn-secondary" disabled>📧 Copy Emails</button>
-    <button id="copyPdfLinksBtn" class="btn-secondary" disabled>📄 Copy PDF Links</button>
-    <button id="copyImageLinksBtn" class="btn-secondary" disabled>🖼️ Copy Image Links</button>
+    <button id="copyPathBtn" class="btn-secondary" disabled>📋 Copy with Source Page</button>
     <button id="exportBtn" class="btn-secondary" disabled>📥 Export CSV</button>
   </div>
 
   <div class="stats-bar">
-    <div id="statCardPages" class="stat-card">
+    <div class="stat-card">
       <div id="statPages" class="stat-val">0</div>
-      <div class="stat-lbl">Pages</div>
+      <div class="stat-lbl">Pages Crawled</div>
     </div>
-    <div id="statCardPdfs" class="stat-card">
+    <div class="stat-card">
       <div id="statPdfs" class="stat-val">0</div>
-      <div class="stat-lbl">PDFs (Found)</div>
+      <div class="stat-lbl">PDFs Checked</div>
     </div>
-    <div id="statCardImages" class="stat-card">
-      <div id="statImages" class="stat-val">0</div>
-      <div class="stat-lbl">Images (OCR)</div>
-    </div>
-    <div id="statCardEmails" class="stat-card">
+    <div class="stat-card">
       <div id="statEmails" class="stat-val">0</div>
-      <div class="stat-lbl">Unique Emails</div>
+      <div class="stat-lbl">Emails Found</div>
     </div>
-    <div id="statCardQueue" class="stat-card">
+    <div class="stat-card">
       <div id="statQueue" class="stat-val">0</div>
-      <div class="stat-lbl">Queue</div>
+      <div class="stat-lbl">Queue Remaining</div>
     </div>
   </div>
 
   <div id="statusText" class="status-text">Ready. Open website and click "Crawl Website".</div>
-  <div id="ocrStatus" class="ocr-status">🔍 OCR Worker: Running text recognition on scanned PDF image...</div>
-
-  <div id="restrictionBanner" class="restriction-banner">
-    🚫 <span id="restrictionBannerText">Restricted site detected.</span>
-  </div>
-  <div id="warningsBanner" class="warnings-banner">
-    ⚠ <span id="warningsBannerText">Restricted image content detected. Crawling continued.</span>
-  </div>
-
-  <div class="tabs-row">
-    <button id="tabEmailsBtn" class="tab-btn active">📧 Extracted Emails (<span id="tabEmailsCount">0</span>)</button>
-    <button id="tabPdfsBtn" class="tab-btn">📄 Discovered PDF Links (<span id="tabPdfsCount">0</span>)</button>
-    <button id="tabImagesBtn" class="tab-btn">🖼️ Discovered Images (<span id="tabImagesCount">0</span>)</button>
-    <button id="tabWarningsBtn" class="tab-btn">⚠️ Restriction Warnings (<span id="tabWarningsCount">0</span>)</button>
-  </div>
 
   <input type="text" id="searchInput" class="search-box"
-    placeholder="🔍 Search emails, main website URL, PDF/Image domains, or links..." style="display:none;" />
+    placeholder="🔍 Search extracted emails, source pages, or domains..." style="display:none;" />
 
-  <!-- View 1: Emails Table with Main Page URL -->
+  <!-- Emails Table -->
   <div id="emailsTableContainer" class="table-container">
     <table>
       <thead>
         <tr>
-          <th style="width: 30%;">Email</th>
-          <th style="width: 14%;">Type</th>
-          <th style="width: 28%;">Found On (Main Page)</th>
-          <th style="width: 28%;">Direct Source / PDF / Image</th>
+          <th style="width: 32%;">Extracted Email Address</th>
+          <th style="width: 18%;">Source Type</th>
+          <th style="width: 40%;">Found On (Page / PDF Document URL)</th>
+          <th style="width: 10%; text-align: center;">Hits</th>
         </tr>
       </thead>
-      <tbody id="resultsBody"></tbody>
-    </table>
-  </div>
-
-  <!-- View 2: PDF Links Table with Main Site Page -->
-  <div id="pdfsTableContainer" class="table-container" style="display: none;">
-    <table>
-      <thead>
+      <tbody id="resultsBody">
         <tr>
-          <th style="width: 38%;">Found On (Main Page)</th>
-          <th style="width: 40%;">Direct PDF File URL</th>
-          <th style="width: 22%;">Status / Emails</th>
+          <td colspan="4" class="empty-state">No emails extracted yet. Click "Crawl Website" to start.</td>
         </tr>
-      </thead>
-      <tbody id="pdfsBody"></tbody>
+      </tbody>
     </table>
   </div>
 
-  <!-- View 3: Images Table with Main Site Page -->
-  <div id="imagesTableContainer" class="table-container" style="display: none;">
-    <table>
-      <thead>
-        <tr>
-          <th style="width: 38%;">Found On (Main Page)</th>
-          <th style="width: 40%;">Direct Image URL</th>
-          <th style="width: 22%;">Status / Emails</th>
-        </tr>
-      </thead>
-      <tbody id="imagesBody"></tbody>
-    </table>
-  </div>
-
-  <!-- View 4: Restriction Warnings Table -->
-  <div id="warningsTableContainer" class="table-container" style="display: none;">
-    <table>
-      <thead>
-        <tr>
-          <th style="width: 20%;">Found On (Page)</th>
-          <th style="width: 22%;">Image URL</th>
-          <th style="width: 15%;">Category</th>
-          <th style="width: 8%;">Confidence</th>
-          <th style="width: 20%;">Evidence</th>
-          <th style="width: 15%;">Status</th>
-        </tr>
-      </thead>
-      <tbody id="warningsBody"></tbody>
-    </table>
-  </div>
-
-  <script src="lib/pdf.min.js"></script>
-  <script src="lib/tesseract.min.js"></script>
   <script src="popup.js"></script>
 </body>
 
