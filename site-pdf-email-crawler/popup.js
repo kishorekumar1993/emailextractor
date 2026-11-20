@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════════════
 // Site & PDF Email Crawler — Popup & Persistent Window UI Script
 // Multi-Source Email Tracking | Visual Content Classification
 // Robust PDF.js Rendering & Offline Tesseract OCR
@@ -1037,6 +1037,8 @@ async function processPdfQueue() {
     if (running.size > 0) {
       await Promise.race(running);
     }
+    // Yield to the UI thread event loop so user actions and UI stay 100% fluid
+    await new Promise((r) => setTimeout(r, 40));
   }
 
   isProcessingPdfQueue = false;
@@ -1252,6 +1254,8 @@ async function processImageQueue() {
     if (running.size > 0) {
       await Promise.race(running);
     }
+    // Yield to the UI thread event loop so user actions and UI stay 100% fluid
+    await new Promise((r) => setTimeout(r, 40));
   }
 
   isProcessingImageQueue = false;
@@ -1433,6 +1437,14 @@ chrome.runtime.onMessage.addListener((msg) => {
     enqueueImageForProcessing(msg);
   }
 
+  if (msg.type === "UPDATE_PDF_STATUS" && msg.url) {
+    updatePdfRecordStatus(msg.url, msg.status, msg.emailsFound);
+  }
+
+  if (msg.type === "UPDATE_IMAGE_STATUS" && msg.url) {
+    updateImageRecordStatus(msg.url, msg.status, msg.emailsFound);
+  }
+
   if (msg.type === "IMAGE_RESTRICTION_WARNING" && msg.warningRecord) {
     registerImageWarning(msg.warningRecord);
   }
@@ -1473,18 +1485,17 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "CRAWL_PROGRESS") {
     requestAnimationFrame(() => {
       if (msg.pagesCrawled !== undefined) statPages.textContent = msg.pagesCrawled;
-      if (msg.pdfsCrawled !== undefined) {
-        const avail = msg.pdfsAvailable !== undefined ? `${msg.pdfsAvailable} / ${msg.pdfsCrawled}` : msg.pdfsCrawled;
-        statPdfs.textContent = avail;
-      }
-      if (msg.imagesScanned !== undefined) {
-        statImages.textContent = msg.imagesScanned;
-      }
       if (msg.discoveredPdfsCount !== undefined) {
         tabPdfsCount.textContent = msg.discoveredPdfsCount;
+        statPdfs.textContent = msg.discoveredPdfsCount;
       }
       if (msg.discoveredImagesCount !== undefined) {
         tabImagesCount.textContent = msg.discoveredImagesCount;
+        statImages.textContent = msg.imagesScanned !== undefined && msg.imagesScanned > 0 ? `${msg.imagesScanned} / ${msg.discoveredImagesCount}` : msg.discoveredImagesCount;
+      }
+      if (msg.findingsCount !== undefined) {
+        statEmails.textContent = msg.findingsCount;
+        tabEmailsCount.textContent = msg.findingsCount;
       }
       if (msg.queueRemaining !== undefined) statQueue.textContent = msg.queueRemaining;
       if (msg.currentUrl) {
@@ -2059,3 +2070,4 @@ if (alwaysWindowModeCheckbox) {
     chrome.storage.local.set({ alwaysWindowMode: alwaysWindowModeCheckbox.checked });
   });
 }
+

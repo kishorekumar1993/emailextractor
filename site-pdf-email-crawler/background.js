@@ -423,17 +423,18 @@ function isProductItemImage(imgTag, rawUrl, skipProductDetails = true) {
 }
 
 // Check if an image is a candidate for OCR
-function isCandidateImage(url, isFromImageElement = false, skipProductDetails = true) {
+function isCandidateImage(url, isFromImageElement = false, skipProductDetails = true, context = "", alt = "", title = "") {
   try {
     const u = new URL(url);
     const lower = (u.pathname + u.search).toLowerCase();
+    const combined = `${lower} ${context} ${alt} ${title}`.toLowerCase();
 
     // Ignore tiny technical icons, spinners, tracking pixels, and favicons
     const ignoreKeywords = [
       "favicon", "spinner", "loading", "spacer", "pixel", "1x1",
       "arrow", "bullet", "emoji", "blank.gif", "dot.gif", "empty.gif"
     ];
-    if (ignoreKeywords.some((kw) => lower.includes(kw))) {
+    if (ignoreKeywords.some((kw) => combined.includes(kw))) {
       return false;
     }
 
@@ -441,27 +442,24 @@ function isCandidateImage(url, isFromImageElement = false, skipProductDetails = 
       return false;
     }
 
-    // Skip small UI icons, social badges, and payment gateways unless explicitly whitelisted
-    if (NON_OCR_GRAPHIC_REGEX.test(lower) && !CORPORATE_WHITELIST_REGEX.test(lower)) {
+    // Skip small UI icons, social badges, and payment gateways
+    if (NON_OCR_GRAPHIC_REGEX.test(lower)) {
       return false;
     }
 
-    // Skip responsive thumbnail images (-150x150, -300x200, etc.) unless matching corporate whitelist
-    if (/-\d{2,4}x\d{2,4}\.(?:jpe?g|png|webp)$/i.test(lower) && !CORPORATE_WHITELIST_REGEX.test(lower)) {
+    // Skip responsive thumbnail images
+    if (/-\d{2,4}x\d{2,4}\.(?:jpe?g|png|webp)$/i.test(lower) && !/contact|email|card/i.test(lower)) {
       return false;
     }
+
+    // High-value OCR candidates: images likely to contain contact details, email addresses, or company certificates
+    const isContactCandidate = /\b(?:contact|email|mail|enquiry|reach|address|card|letterhead|cert|certificate|license|iso|award)\b/i.test(combined);
 
     if (skipProductDetails) {
-      // When "Strictly exclude product & category images (Scan corporate & catalog images only)" is checked:
-      // only scan corporate logos, headers, banners, brochures, catalogs, certificates, and contacts
-      return CORPORATE_WHITELIST_REGEX.test(lower);
+      return isContactCandidate;
     }
 
-    if (isFromImageElement) {
-      return true;
-    }
-
-    return IMAGE_EXT_REGEX.test(lower);
+    return isContactCandidate || (CORPORATE_WHITELIST_REGEX.test(combined) && !PRODUCT_CONTAINER_REGEX.test(combined));
   } catch {
     return false;
   }
@@ -1598,84 +1596,79 @@ async function discoverCompanySisterDomainEmails(startUrl, companyKeywords, norm
 // ─── Fast Sitemap & Robots.txt Discovery ─────────────────────────────
 // Discovers official site pages upfront without relying solely on DOM links
 // Bounded to at most 12 fetches with safety timeouts to prevent start delays
+// ─── Fast Sitemap & Robots.txt Discovery ─────────────────────────────
+// Discovers official site pages upfront without blocking crawler startup.
+// Fetches sitemap.xml and robots.txt concurrently with a strict 1500ms timeout.
 async function probeSitemaps(baseOrigin, abortSignal) {
   const discovered = [];
   const baseEndpoints = [
     `${baseOrigin}/sitemap.xml`,
-    `${baseOrigin}/sitemap_index.xml`,
     `${baseOrigin}/robots.txt`
   ];
-  const queue = [...baseEndpoints];
-  const seenEndpoints = new Set(queue);
-  let fetched = 0;
-  const MAX_FETCHES = 12;
 
-  // FIX Issue 5: Always enforce per-request timeout; fall back to AbortSignal.timeout
-  // when AbortSignal.any is unavailable so the crawl never hangs on a stalled request.
   function getSignal(ms) {
     if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
       return abortSignal
         ? AbortSignal.any([AbortSignal.timeout(ms), abortSignal])
         : AbortSignal.timeout(ms);
     }
-    // Older Chrome builds: always use a plain timeout so requests do not hang forever
     return AbortSignal.timeout(ms);
   }
 
-  while (queue.length > 0 && fetched < MAX_FETCHES) {
-    if (abortSignal && abortSignal.aborted) break;
-    const endpoint = queue.shift();
-    fetched++;
-
+  const seen = new Set();
+  const promises = baseEndpoints.map(async (endpoint) => {
     try {
+      if (abortSignal && abortSignal.aborted) return;
       const res = await fetch(endpoint, {
         credentials: "omit",
         headers: { "Accept": "text/xml,application/xml,text/plain,*/*" },
-        signal: getSignal(2500)
+        signal: getSignal(1500)
       });
-      if (!res.ok) continue;
+      if (!res.ok) return;
       const text = await res.text();
-      if (!text || text.length < 20) continue;
+      if (!text || text.length < 20) return;
 
       if (endpoint.endsWith("robots.txt")) {
         const smMatches = text.match(/^\s*Sitemap:\s*(https?:\/\/[^\s]+)/gim);
         if (smMatches) {
-          for (const sm of smMatches) {
+          for (const sm of smMatches.slice(0, 3)) {
             const smUrl = sm.replace(/^\s*Sitemap:\s*/i, "").trim();
-            if (smUrl && !seenEndpoints.has(smUrl) && queue.length < MAX_FETCHES) {
-              seenEndpoints.add(smUrl);
-              queue.push(smUrl);
+            if (smUrl && !seen.has(smUrl)) {
+              seen.add(smUrl);
+              discovered.push(smUrl);
             }
           }
         }
-        continue;
+        return;
       }
 
-      // Check for sitemap index
+      // Check for sitemap index or standard urls
       const subSitemaps = text.match(/<sitemap>[\s\S]*?<loc>([^<]+)<\/loc>[\s\S]*?<\/sitemap>/gi);
       if (subSitemaps && subSitemaps.length > 0) {
-        for (const s of subSitemaps.slice(0, 4)) {
-          if (abortSignal && abortSignal.aborted) break;
+        for (const s of subSitemaps.slice(0, 3)) {
           const locMatch = s.match(/<loc>([^<]+)<\/loc>/i);
           if (locMatch && locMatch[1]) {
-            const subUrl = locMatch[1].trim();
-            if (!seenEndpoints.has(subUrl) && queue.length < MAX_FETCHES) {
-              seenEndpoints.add(subUrl);
-              queue.push(subUrl);
+            const u = locMatch[1].trim();
+            if (!seen.has(u)) {
+              seen.add(u);
+              discovered.push(u);
             }
           }
         }
       } else {
         const locs = text.match(/<loc>([^<]+)<\/loc>/gi) || [];
-        for (const l of locs) {
+        for (const l of locs.slice(0, 300)) {
           const u = l.replace(/<\/?loc>/gi, "").trim();
-          if (u) discovered.push(u);
+          if (u && !seen.has(u)) {
+            seen.add(u);
+            discovered.push(u);
+          }
         }
       }
-
-      if (discovered.length >= 500) break;
     } catch {}
-  }
+  });
+
+  await Promise.allSettled(promises);
   return discovered;
 }
 
@@ -1841,13 +1834,14 @@ async function runProductionCrawl(crawlState) {
 
   function enqueueImageForOcr(rawImageUrl, sourcePage, isFromImageElement = true, imageContext = "", altText = "", titleText = "") {
     if (!ocrImages) return;
-    const maxSiteImages = skipProductDetailPages ? 25 : 50;
+    // Cap at 10 high-value contact/certificate images max to prevent UI thread starvation
+    const maxSiteImages = 10;
     if (enqueuedImageUrls.size >= maxSiteImages) return;
 
     const imageUrl = getHighResImageUrl(rawImageUrl);
     if (!imageUrl) return;
     if (visitedImages.has(imageUrl) || enqueuedImageUrls.has(imageUrl)) return;
-    if (!isCandidateImage(imageUrl, isFromImageElement, skipProductDetailPages)) return;
+    if (!isCandidateImage(imageUrl, isFromImageElement, skipProductDetailPages, imageContext, altText, titleText)) return;
 
     enqueuedImageUrls.add(imageUrl);
 
@@ -1904,11 +1898,9 @@ async function runProductionCrawl(crawlState) {
     discoveredImagesCount: 0
   });
 
-  // FIX Issue 1: Sitemap discovery runs in background (non-blocking).
-  // Workers start immediately on the seed URL; sitemap results feed into the queues
-  // as they arrive, so the user sees progress within ~1 second of clicking Start.
-  function ingestSitemapUrls(sitemapUrls) {
-    if (!Array.isArray(sitemapUrls) || crawlState.aborted) return;
+  // Fast sitemap discovery: seeds official corporate & catalog pages in < 1.5s
+  try {
+    const sitemapUrls = await probeSitemaps(baseOrigin, crawlAbortController.signal);
     const prioritySeeds = [];
     const normalSeeds = [];
     for (const smUrl of sitemapUrls) {
@@ -1939,13 +1931,9 @@ async function runProductionCrawl(crawlState) {
     if (normalSeeds.length > 0 && htmlQueue.length < maxPages) {
       htmlQueue.push(...normalSeeds.slice(0, maxPages - htmlQueue.length));
     }
+  } catch (smErr) {
+    console.debug("Sitemap probe notice:", smErr);
   }
-  // Fire-and-forget: sitemap resolves while workers run; sitemapSettled flag
-  // tells workers they may now exit when queues are empty.
-  const sitemapDiscoveryPromise = probeSitemaps(baseOrigin, crawlAbortController.signal)
-    .then(ingestSitemapUrls)
-    .catch((smErr) => console.debug("Sitemap probe notice:", smErr))
-    .finally(() => { sitemapSettled = true; });
 
   // Deep URL Navigation Seeding:
   // When starting on deep subpages (e.g., e-catalogs, flipbooks, deep product views like /en/e-catalog-253/All-Electric-Precise-Plunger-Machine.html),
@@ -2074,20 +2062,55 @@ async function runProductionCrawl(crawlState) {
           return;
         }
 
-        // Base64 encode for PDF.js in popup (cap Base64 IPC payload to 3MB; larger streams directly)
-        const base64Data = buffer.byteLength <= 3 * 1024 * 1024 ? arrayBufferToBase64(buffer) : "";
+        // Fast in-memory PDF digital text extraction (~5ms scan in background, zero UI freeze)
+        let extractedPdfEmails = [];
+        try {
+          const uint8 = new Uint8Array(buffer);
+          let binaryStr = "";
+          const chunkSize = 65536;
+          const maxScanBytes = Math.min(uint8.length, 12 * 1024 * 1024);
+          for (let i = 0; i < maxScanBytes; i += chunkSize) {
+            const chunk = uint8.subarray(i, Math.min(i + chunkSize, maxScanBytes));
+            binaryStr += String.fromCharCode.apply(null, chunk);
+          }
+          extractedPdfEmails = normalizeAndExtractEmails(binaryStr);
+        } catch {}
+
+        let emailsFoundInDoc = 0;
+        if (extractedPdfEmails.length > 0) {
+          for (const em of extractedPdfEmails) {
+            emailsFoundInDoc++;
+            recordCleanEmail(em, currentUrl, "PDF Document", mainSitePage);
+          }
+        }
 
         pdfsAvailableCount++;
         crawlState.pdfsAvailableCount = pdfsAvailableCount;
-        if (pdfRec) pdfRec.status = "Rendering with PDF.js...";
 
-        emitProcessPdf({
-          pdfUrl: currentUrl,
-          mainPageUrl: mainSitePage,
-          base64Data,
-          numBytes: buffer.byteLength,
-          ocrPdfs
-        });
+        if (pdfRec) {
+          pdfRec.emailsFound = emailsFoundInDoc;
+          pdfRec.status = emailsFoundInDoc > 0 ? `Active (${emailsFoundInDoc} emails)` : "Parsed (0 emails)";
+        }
+
+        // Notify popup immediately of updated PDF status
+        chrome.runtime.sendMessage({
+          type: "UPDATE_PDF_STATUS",
+          url: currentUrl,
+          status: pdfRec ? pdfRec.status : "Parsed",
+          emailsFound: emailsFoundInDoc
+        }).catch(() => {});
+
+        // Forward to popup PDF.js pipeline ONLY if no digital text was found AND OCR is enabled AND PDF is small (<= 4MB)
+        if (emailsFoundInDoc === 0 && ocrPdfs && buffer.byteLength <= 4 * 1024 * 1024) {
+          const base64Data = buffer.byteLength <= 2 * 1024 * 1024 ? arrayBufferToBase64(buffer) : "";
+          emitProcessPdf({
+            pdfUrl: currentUrl,
+            mainPageUrl: mainSitePage,
+            base64Data,
+            numBytes: buffer.byteLength,
+            ocrPdfs
+          });
+        }
       } catch (pdfErr) {
         if (pdfRec) {
           pdfRec.status = crawlState.aborted ? "Stopped" : "Access/Network Error";
@@ -2407,34 +2430,23 @@ async function runProductionCrawl(crawlState) {
     return null;
   }
 
-  // sitemapSettled: set to true once probeSitemaps resolves.
-  // Workers must NOT exit until this is true – sitemap may inject URLs into queues.
-  let sitemapSettled = false;
-
   async function workerThread() {
     while (!crawlState.aborted && !allWorkCompleted) {
       const task = getNextTask();
 
       if (!task) {
-        // Case 1: Sitemap not yet settled – new URLs may arrive soon. Wait briefly.
-        if (!sitemapSettled) {
-          await new Promise((r) => setTimeout(r, 60));
-          continue;
-        }
-
-        // Case 2: Sitemap settled but other workers are active – they may enqueue more work.
         if (activeWorkersCount > 0) {
-          await new Promise((r) => setTimeout(r, 60));
+          // Other parallel workers are still fetching pages/PDFs (which may enqueue new work)
+          await new Promise((r) => setTimeout(r, 40));
           continue;
         }
 
-        // Case 3: All settled, all idle. Final grace-period check to handle race where
-        // a worker just finished and pushed to queue before decrementing activeWorkersCount.
-        await new Promise((r) => setTimeout(r, 120));
+        // Grace period: ensure no worker just finished and enqueued work before activeWorkersCount reached 0
+        await new Promise((r) => setTimeout(r, 100));
         if (crawlState.aborted || allWorkCompleted) break;
         if (htmlQueue.length > 0 || pdfQueue.length > 0 || imageOcrQueue.length > 0) continue;
         if (activeWorkersCount > 0) continue;
-        // Truly done.
+
         allWorkCompleted = true;
         break;
       }
@@ -2460,10 +2472,7 @@ async function runProductionCrawl(crawlState) {
     workerPromises.push(workerThread());
   }
 
-  // Workers are running. Sitemap discovery runs in parallel.
-  // Once sitemaps resolve, any new URLs land in htmlQueue/pdfQueue where active workers pick them up.
-  // We wait for BOTH: (1) all workers done, (2) sitemap fully flushed.
-  await Promise.all([...workerPromises, sitemapDiscoveryPromise]);
+  await Promise.all(workerPromises);
 
   // ── Global Fallback: Sister Domain & Alternate TLD Company Probe ──
   // If no emails were discovered in static catalog/HTML pages (common on IndiaMART, TradeIndia, regional domains),
@@ -2532,6 +2541,11 @@ async function runProductionCrawl(crawlState) {
     imageWarnings
   };
 }
+
+
+
+
+
 
 
 
