@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    :root {
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --danger: #dc2626;
+      --danger-hover: #b91c1c;
+      --success: #16a34a;
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-muted: #64748b;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      width: 700px;
+      margin: 0;
+      padding: 14px;
+      background-color: var(--bg);
+      color: var(--text);
+    }
+
+    body.window-mode {
+      width: 100% !important;
+      min-width: 680px;
+      max-width: 100%;
+      min-height: 100vh;
+      padding: 16px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+      gap: 10px;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn-popout {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      color: #1d4ed8;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 5px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+
+    .btn-popout:hover {
+      background: #dbeafe;
+      border-color: #93c5fd;
+    }
+
+    .btn-close-win {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: #fee2e2;
+      border: 1px solid #fca5a5;
+      color: #991b1b;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 5px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+
+    .btn-close-win:hover {
+      background: #fecaca;
+    }
+
+    .target-url-container {
+      margin-bottom: 12px;
+      background: var(--card-bg);
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+
+    .target-url-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+
+    .target-url-row {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .target-url-input {
+      flex: 1;
+      padding: 6px 10px;
+      font-size: 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      outline: none;
+      font-family: monospace;
+    }
+
+    .target-url-input:focus {
+      border-color: var(--primary);
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .badge {
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 9999px;
+      background: #e0e7ff;
+      color: #3730a3;
+      font-weight: 600;
+    }
+
+    .badge-ocr {
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    .options-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 12px;
+      background: var(--card-bg);
+      padding: 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      font-size: 12px;
+    }
+
+    .option-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .option-group label {
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    select,
+    input[type="number"],
+    input[type="text"] {
+      padding: 5px 8px;
+      border-radius: 4px;
+      border: 1px solid #cbd5e1;
+      font-size: 12px;
+      outline: none;
+    }
+
+    select:focus,
+    input:focus {
+      border-color: var(--primary);
+    }
+
+    .checkbox-col {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      grid-column: span 2;
+      margin-top: 4px;
+    }
+
+    .checkbox-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      font-weight: normal !important;
+      color: var(--text) !important;
+    }
+
+    .actions-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-bottom: 10px;
+    }
+
+    button {
+      padding: 6px 10px;
+      border-radius: 5px;
+      border: none;
+      font-weight: 600;
+      font-size: 11px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      transition: background 0.15s ease;
+      white-space: nowrap;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+      flex: 1 1 120px;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: var(--primary-hover);
+    }
+
+    .btn-danger {
+      background: var(--danger);
+      color: white;
+    }
+
+    .btn-danger:hover:not(:disabled) {
+      background: var(--danger-hover);
+    }
+
+    .btn-highlight {
+      background: #10b981;
+      color: white;
+    }
+
+    .btn-highlight:hover:not(:disabled) {
+      background: #059669;
+    }
+
+    .btn-secondary {
+      background: #e2e8f0;
+      color: #334155;
+    }
+
+    .btn-secondary:hover:not(:disabled) {
+      background: #cbd5e1;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+
+    .stat-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 8px;
+      text-align: center;
+      cursor: pointer;
+    }
+
+    .stat-card:hover {
+      border-color: var(--primary);
+    }
+
+    .stat-val {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--primary);
+    }
+
+    .stat-lbl {
+      font-size: 10px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+
+    .status-text {
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 8px;
+      padding: 4px 8px;
+      background: #f1f5f9;
+      border-radius: 4px;
+    }
+
+    .ocr-status {
+      font-size: 11px;
+      color: #065f46;
+      background: #d1fae5;
+      padding: 4px 8px;
+      border-radius: 4px;
+      margin-bottom: 8px;
+      display: none;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .restriction-banner {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      background: #fee2e2;
+      border: 1px solid #fca5a5;
+      color: #991b1b;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 6px 10px;
+      border-radius: 5px;
+      margin-bottom: 8px;
+    }
+
+    .warnings-banner {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      background: #fef3c7;
+      border: 1px solid #fcd34d;
+      color: #92400e;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 5px 10px;
+      border-radius: 5px;
+      margin-bottom: 6px;
+    }
+
+    .type-warn {
+      background: #fef3c7;
+      color: #92400e;
+      font-weight: bold;
+    }
+
+    .warn-status {
+      color: #d97706;
+      font-weight: bold;
+      font-size: 10px;
+    }
+
+    .tabs-row {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 8px;
+      border-bottom: 2px solid var(--border);
+    }
+
+    .tab-btn {
+      padding: 6px 12px;
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      font-weight: 600;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-radius: 0;
+    }
+
+    .tab-btn.active {
+      color: var(--primary);
+      border-bottom-color: var(--primary);
+      background: transparent;
+    }
+
+    .search-box {
+      width: 100%;
+      margin-bottom: 8px;
+    }
+
+    .table-container {
+      max-height: 250px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--card-bg);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+
+    th,
+    td {
+      padding: 6px 8px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      word-break: break-all;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: #f8fafc;
+      color: var(--text-muted);
+      font-weight: 600;
+      z-index: 1;
+    }
+
+    .type-badge {
+      display: inline-block;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: bold;
+    }
+
+    .type-pdf {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    .type-ocr {
+      background: #dcfce7;
+      color: #166534;
+      font-weight: bold;
+    }
+
+    .type-html {
+      background: #e0f2fe;
+      color: #0369a1;
+    }
+
+    .type-mailto {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      background: #f1f5f9;
+      color: #475569;
+    }
+
+    .status-badge.has-email {
+      background: #dcfce7;
+      color: #166534;
+      font-weight: bold;
+    }
+
+    .source-link {
+      color: var(--primary);
+      text-decoration: none;
+      max-width: 145px;
+      display: inline-block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+
+    .source-link:hover {
+      text-decoration: underline;
+    }
+
+    .main-site-link {
+      color: #0369a1;
+      font-weight: 600;
+      text-decoration: none;
+      max-width: 145px;
+      display: inline-block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+
+    .main-site-link:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h2>⚡ Site & PDF Crawler <span class="badge">Main Site URL Traceability</span> <span class="badge badge-ocr">OCR Enabled</span> <span id="windowModeBadge" class="badge" style="display:none; background:#ecfdf5; color:#047857;">🟢 Persistent Window</span></h2>
+    <div class="header-actions">
+      <button id="popoutWindowBtn" class="btn-popout" title="Open in persistent window that stays open while browsing other tabs">🗗 Keep Open (Window Mode)</button>
+      <button id="closeWindowBtn" class="btn-close-win" style="display:none;" title="Close this persistent window">❌ Close Window</button>
+    </div>
+  </header>
+
+  <div class="target-url-container">
+    <label for="targetUrlInput" class="target-url-label">🌐 Target Website URL to Crawl:</label>
+    <div class="target-url-row">
+      <input type="text" id="targetUrlInput" class="target-url-input" placeholder="https://example.com/..." />
+      <button id="detectTabBtn" class="btn-secondary" title="Fetch current active browser tab URL" style="white-space: nowrap;">🔄 Use Current Tab</button>
+    </div>
+  </div>
+
+  <div class="options-grid">
+    <div class="option-group">
+      <label for="maxPagesSelect">Crawl Scope / Max Pages</label>
+      <select id="maxPagesSelect">
+        <option value="50">50 pages (Quick)</option>
+        <option value="150">150 pages (Standard)</option>
+        <option value="500" selected>500 pages (Deep)</option>
+        <option value="1500">1500 pages (Complete Site)</option>
+      </select>
+    </div>
+    <div class="option-group">
+      <label for="concurrencySelect">Speed / Concurrency</label>
+      <select id="concurrencySelect">
+        <option value="4">Gentle (4 parallel)</option>
+        <option value="8" selected>Fast (8 parallel)</option>
+        <option value="12">Turbo (12 parallel)</option>
+      </select>
+    </div>
+    <div class="checkbox-col">
+      <label class="checkbox-label">
+        <input type="checkbox" id="ocrImages" checked />
+        <strong>Scan text inside images & scanned PDFs (OCR)</strong>
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="checkPdfs" checked />
+        Review all links for available PDFs (Any domain: S3, CDN & local)
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="skipProductDetails" checked />
+        <strong>Strictly exclude product & category images (Scan corporate & catalog images only)</strong>
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="includeSubdomains" />
+        Include Subdomains
+      </label>
+      <label class="checkbox-label" title="Always opens crawler in a persistent floating window that stays visible across all tabs">
+        <input type="checkbox" id="alwaysWindowMode" />
+        <strong>Always open in persistent window (won't close on tab switch)</strong>
+      </label>
+    </div>
+  </div>
+
+  <div class="actions-row">
+    <button id="startBtn" class="btn-primary">▶ Crawl Website</button>
+    <button id="stopBtn" class="btn-danger" style="display: none;">⏹ Stop</button>
+    <button id="copyAllUnifiedBtn" class="btn-highlight" disabled>📋 Copy All (Emails + PDFs + Images)</button>
+    <button id="copyPathBtn" class="btn-secondary" disabled>📋 Copy with Path</button>
+    <button id="copyBtn" class="btn-secondary" disabled>📧 Copy Emails</button>
+    <button id="copyPdfLinksBtn" class="btn-secondary" disabled>📄 Copy PDF Links</button>
+    <button id="copyImageLinksBtn" class="btn-secondary" disabled>🖼️ Copy Image Links</button>
+    <button id="exportBtn" class="btn-secondary" disabled>📥 Export CSV</button>
+  </div>
+
+  <div class="stats-bar">
+    <div id="statCardPages" class="stat-card">
+      <div id="statPages" class="stat-val">0</div>
+      <div class="stat-lbl">Pages</div>
+    </div>
+    <div id="statCardPdfs" class="stat-card">
+      <div id="statPdfs" class="stat-val">0</div>
+      <div class="stat-lbl">PDFs (Found)</div>
+    </div>
+    <div id="statCardImages" class="stat-card">
+      <div id="statImages" class="stat-val">0</div>
+      <div class="stat-lbl">Images (OCR)</div>
+    </div>
+    <div id="statCardEmails" class="stat-card">
+      <div id="statEmails" class="stat-val">0</div>
+      <div class="stat-lbl">Unique Emails</div>
+    </div>
+    <div id="statCardQueue" class="stat-card">
+      <div id="statQueue" class="stat-val">0</div>
+      <div class="stat-lbl">Queue</div>
+    </div>
+  </div>
+
+  <div id="statusText" class="status-text">Ready. Open website and click "Crawl Website".</div>
+  <div id="ocrStatus" class="ocr-status">🔍 OCR Worker: Running text recognition on scanned PDF image...</div>
+
+  <div id="restrictionBanner" class="restriction-banner">
+    🚫 <span id="restrictionBannerText">Restricted site detected.</span>
+  </div>
+  <div id="warningsBanner" class="warnings-banner">
+    ⚠ <span id="warningsBannerText">Restricted image content detected. Crawling continued.</span>
+  </div>
+
+  <div class="tabs-row">
+    <button id="tabEmailsBtn" class="tab-btn active">📧 Extracted Emails (<span id="tabEmailsCount">0</span>)</button>
+    <button id="tabPdfsBtn" class="tab-btn">📄 Discovered PDF Links (<span id="tabPdfsCount">0</span>)</button>
+    <button id="tabImagesBtn" class="tab-btn">🖼️ Discovered Images (<span id="tabImagesCount">0</span>)</button>
+    <button id="tabWarningsBtn" class="tab-btn">⚠️ Restriction Warnings (<span id="tabWarningsCount">0</span>)</button>
+  </div>
+
+  <input type="text" id="searchInput" class="search-box"
+    placeholder="🔍 Search emails, main website URL, PDF/Image domains, or links..." style="display:none;" />
+
+  <!-- View 1: Emails Table with Main Page URL -->
+  <div id="emailsTableContainer" class="table-container">
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 30%;">Email</th>
+          <th style="width: 14%;">Type</th>
+          <th style="width: 28%;">Found On (Main Page)</th>
+          <th style="width: 28%;">Direct Source / PDF / Image</th>
+        </tr>
+      </thead>
+      <tbody id="resultsBody"></tbody>
+    </table>
+  </div>
+
+  <!-- View 2: PDF Links Table with Main Site Page -->
+  <div id="pdfsTableContainer" class="table-container" style="display: none;">
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 38%;">Found On (Main Page)</th>
+          <th style="width: 40%;">Direct PDF File URL</th>
+          <th style="width: 22%;">Status / Emails</th>
+        </tr>
+      </thead>
+      <tbody id="pdfsBody"></tbody>
+    </table>
+  </div>
+
+  <!-- View 3: Images Table with Main Site Page -->
+  <div id="imagesTableContainer" class="table-container" style="display: none;">
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 38%;">Found On (Main Page)</th>
+          <th style="width: 40%;">Direct Image URL</th>
+          <th style="width: 22%;">Status / Emails</th>
+        </tr>
+      </thead>
+      <tbody id="imagesBody"></tbody>
+    </table>
+  </div>
+
+  <!-- View 4: Restriction Warnings Table -->
+  <div id="warningsTableContainer" class="table-container" style="display: none;">
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 20%;">Found On (Page)</th>
+          <th style="width: 22%;">Image URL</th>
+          <th style="width: 15%;">Category</th>
+          <th style="width: 8%;">Confidence</th>
+          <th style="width: 20%;">Evidence</th>
+          <th style="width: 15%;">Status</th>
+        </tr>
+      </thead>
+      <tbody id="warningsBody"></tbody>
+    </table>
+  </div>
+
+  <script src="lib/pdf.min.js"></script>
+  <script src="lib/tesseract.min.js"></script>
+  <script src="popup.js"></script>
+</body>
+
+</html>
