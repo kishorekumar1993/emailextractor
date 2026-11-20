@@ -1565,86 +1565,26 @@ startBtn.addEventListener("click", async () => {
       initialLinks
     },
     (response) => {
-      isCrawling = false;
-      startBtn.style.display = "inline-flex";
-      stopBtn.style.display = "none";
-
       if (chrome.runtime.lastError) {
+        isCrawling = false;
+        startBtn.style.display = "inline-flex";
+        stopBtn.style.display = "none";
+        stopHeartbeat();
         statusText.textContent = `Error: ${chrome.runtime.lastError.message}`;
         return;
       }
 
       if (!response || !response.ok) {
+        isCrawling = false;
+        startBtn.style.display = "inline-flex";
+        stopBtn.style.display = "none";
+        stopHeartbeat();
         statusText.textContent = `Failed: ${response?.error || "Unknown error"}`;
         return;
       }
 
-      const {
-        findings,
-        pagesCrawled,
-        pdfsChecked,
-        pdfsAvailable,
-        discoveredPdfs,
-        discoveredImages,
-        aborted,
-        siteRestrictedRecord,
-        imageWarnings: finalWarnings
-      } = response.data;
-
-      if (findings && findings.length > 0) {
-        for (const f of findings) registerFoundEmail(f);
-      }
-
-      if (discoveredPdfs && discoveredPdfs.length > 0) {
-        for (const p of discoveredPdfs) {
-          const existing = currentPdfs.find((e) => e.url === p.url);
-          if (!existing) {
-            currentPdfs.push(p);
-          } else if (existing.status === "Queued" && p.status !== "Queued") {
-            existing.status = p.status;
-          }
-        }
-        renderPdfRows(currentPdfs);
-      }
-
-      if (discoveredImages && discoveredImages.length > 0) {
-        for (const img of discoveredImages) {
-          const existing = currentImages.find((e) => e.url === img.url);
-          if (!existing) {
-            currentImages.push(img);
-          } else if (existing.status === "Queued" && img.status !== "Queued") {
-            existing.status = img.status;
-          }
-        }
-        renderImageRows(currentImages);
-      }
-
-      if (finalWarnings && finalWarnings.length > 0) {
-        for (const w of finalWarnings) registerImageWarning(w);
-      }
-
-      if (siteRestrictedRecord && restrictionBanner && restrictionBanner.style.display !== "flex") {
-        showSiteRestricted(siteRestrictedRecord);
-      }
-
-      statEmails.textContent = currentFindings.length;
-      tabEmailsCount.textContent = currentFindings.length;
-      statPages.textContent = pagesCrawled;
-      tabPdfsCount.textContent = currentPdfs.length;
-      tabImagesCount.textContent = currentImages.length;
-      statPdfs.textContent = pdfsAvailable !== undefined ? `${pdfsAvailable} / ${pdfsChecked}` : pdfsChecked;
-      statImages.textContent = currentImages.length;
-      statQueue.textContent = "0";
-
-      if (isProcessingPdfQueue || isProcessingImageQueue) {
-        statusText.textContent = "HTML crawl done. OCR worker is scanning discovered documents & images...";
-      } else if (aborted) {
-        statusText.textContent = `Stopped. Gathered ${currentFindings.length} emails, ${currentPdfs.length} PDFs & ${currentImages.length} images.`;
-      } else {
-        statusText.textContent = `Completed! Extracted ${currentFindings.length} unique emails from ${pagesCrawled} pages, ${currentPdfs.length} PDFs & ${currentImages.length} images.${currentWarnings.length > 0 ? ` ${currentWarnings.length} image warning(s).` : ""}`;
-      }
-
-      updateActionButtons();
+      // Crawl started successfully in the background worker.
+      // All findings, progress, and completion are handled reactively by onMessage listeners.
     }
   );
 });

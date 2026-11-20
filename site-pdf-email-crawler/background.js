@@ -1304,20 +1304,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     };
     activeCrawl = crawlState;
 
+    // Acknowledge crawl start immediately so the message channel closes cleanly without timeout
+    sendResponse({ ok: true, started: true });
+
+    // Run crawler asynchronously in the background; updates/completion are dispatched via events
     runProductionCrawl(crawlState)
       .then((data) => {
         lastCompletedCrawl = { ...data, isCrawling: false };
         if (activeCrawl === crawlState) activeCrawl = null;
         chrome.runtime.sendMessage({ type: "CRAWL_COMPLETED", data: lastCompletedCrawl }).catch(() => {});
-        sendResponse({ ok: true, data });
       })
       .catch((err) => {
         if (activeCrawl === crawlState) activeCrawl = null;
         chrome.runtime.sendMessage({ type: "CRAWL_FAILED", error: err.message }).catch(() => {});
-        sendResponse({ ok: false, error: err.message });
       });
 
-    return true;
+    return false;
   }
 
   if (msg.type === "GET_CRAWL_STATUS") {
@@ -1358,7 +1360,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     } else {
       sendResponse({ ok: true, isCrawling: false, findings: [], discoveredPdfs: [], discoveredImages: [], imageWarnings: [] });
     }
-    return true;
+    return false;
   }
 
   if (msg.type === "CHECK_IMAGE_RESTRICTION") {
@@ -1377,7 +1379,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
     }
     sendResponse({ ok: true, warning });
-    return true;
+    return false;
   }
 
   if (msg.type === "REGISTER_EMAIL" || msg.type === "RECORD_OCR_EMAIL") {
@@ -1385,7 +1387,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       activeCrawl.recordEmail(msg.email, msg.sourceUrl, msg.sourceType, msg.mainPageUrl);
     }
     sendResponse({ ok: true });
-    return true;
+    return false;
   }
 
   if (msg.type === "UPDATE_PDF_STATUS") {
@@ -1393,7 +1395,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       activeCrawl.updatePdfStatus(msg.url, msg.status, msg.emailsFound);
     }
     sendResponse({ ok: true });
-    return true;
+    return false;
   }
 
   if (msg.type === "UPDATE_IMAGE_STATUS") {
@@ -1401,7 +1403,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       activeCrawl.updateImageStatus(msg.url, msg.status, msg.emailsFound);
     }
     sendResponse({ ok: true });
-    return true;
+    return false;
   }
 
   if (msg.type === "RECORD_IMAGE_WARNING") {
@@ -1409,7 +1411,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       activeCrawl.addImageWarning(msg.warningRecord);
     }
     sendResponse({ ok: true });
-    return true;
+    return false;
   }
 
   // Large PDF binary buffer streaming fallback (bypasses CORS in popup context)
@@ -1426,12 +1428,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((err) => {
         sendResponse({ ok: false, error: err.message });
       });
-    return true;
+    return true; // True asynchronous fetch
   }
 
   if (msg.type === "PING") {
     sendResponse({ ok: true, isCrawling: !!(activeCrawl && activeCrawl.isCrawling) });
-    return true;
+    return false;
   }
 
   if (msg.type === "STOP_CRAWL") {
@@ -1442,7 +1444,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     } else {
       sendResponse({ ok: true, stopped: false });
     }
-    return true;
+    return false;
   }
 });
 
