@@ -448,6 +448,17 @@ function isCandidateImage(url, isFromImageElement = false, skipProductDetails = 
       return false;
     }
 
+    // Skip responsive thumbnail images (-150x150, -300x200, etc.) unless matching corporate whitelist
+    if (/-\d{2,4}x\d{2,4}\.(?:jpe?g|png|webp)$/i.test(lower) && !CORPORATE_WHITELIST_REGEX.test(lower)) {
+      return false;
+    }
+
+    if (skipProductDetails) {
+      // When "Strictly exclude product & category images (Scan corporate & catalog images only)" is checked:
+      // only scan corporate logos, headers, banners, brochures, catalogs, certificates, and contacts
+      return CORPORATE_WHITELIST_REGEX.test(lower);
+    }
+
     if (isFromImageElement) {
       return true;
     }
@@ -1416,7 +1427,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   // Large PDF binary buffer streaming fallback (bypasses CORS in popup context)
   if (msg.type === "FETCH_PDF_BUFFER") {
-    fetch(msg.url, { credentials: "omit", headers: PDF_FETCH_HEADERS })
+    fetch(msg.url, { credentials: "omit", headers: PDF_FETCH_HEADERS, signal: AbortSignal.timeout(8000) })
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.arrayBuffer();
@@ -1440,6 +1451,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (activeCrawl) {
       activeCrawl.aborted = true;
       activeCrawl.isCrawling = false;
+      if (activeCrawl.abortController) {
+        try {
+          activeCrawl.abortController.abort();
+        } catch {}
+      }
       sendResponse({ ok: true, stopped: true });
     } else {
       sendResponse({ ok: true, stopped: false });
@@ -1580,7 +1596,7 @@ async function discoverCompanySisterDomainEmails(startUrl, companyKeywords, norm
 
 // ─── Fast Sitemap & Robots.txt Discovery ─────────────────────────────
 // Discovers official site pages upfront without relying solely on DOM links
-async function probeSitemaps(baseOrigin) {
+async function probeSitemaps(baseOrigin, abortSignal) {
   const discovered = [];
   const sitemapEndpoints = [
     `${baseOrigin}/sitemap.xml`,
@@ -1588,12 +1604,20 @@ async function probeSitemaps(baseOrigin) {
     `${baseOrigin}/robots.txt`
   ];
 
+  function getSignal(ms) {
+    if (abortSignal && typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+      return AbortSignal.any([AbortSignal.timeout(ms), abortSignal]);
+    }
+    return abortSignal || AbortSignal.timeout(ms);
+  }
+
   for (const endpoint of sitemapEndpoints) {
+    if (abortSignal && abortSignal.aborted) break;
     try {
       const res = await fetch(endpoint, {
         credentials: "omit",
         headers: { "Accept": "text/xml,application/xml,text/plain,*/*" },
-        signal: AbortSignal.timeout(2500)
+        signal: getSignal(2500)
       });
       if (!res.ok) continue;
       const text = await res.text();
@@ -1616,13 +1640,14 @@ async function probeSitemaps(baseOrigin) {
       const subSitemaps = text.match(/<sitemap>[\s\S]*?<loc>([^<]+)<\/loc>[\s\S]*?<\/sitemap>/gi);
       if (subSitemaps && subSitemaps.length > 0) {
         for (const s of subSitemaps.slice(0, 4)) {
+          if (abortSignal && abortSignal.aborted) break;
           const locMatch = s.match(/<loc>([^<]+)<\/loc>/i);
           if (locMatch && locMatch[1]) {
             try {
               const subRes = await fetch(locMatch[1].trim(), {
                 credentials: "omit",
                 headers: { "Accept": "text/xml,application/xml,*/*" },
-                signal: AbortSignal.timeout(2000)
+                signal: getSignal(2000)
               });
               if (subRes.ok) {
                 const subText = await subRes.text();
@@ -1659,6 +1684,16 @@ async function runProductionCrawl(crawlState) {
   const baseOrigin = startObj.origin;
   const baseHostname = startObj.hostname;
 
+  const crawlAbortController = new AbortController();
+  crawlState.abortController = crawlAbortController;
+
+  function createFetchSignal(timeoutMs = 4500) {
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+      return AbortSignal.any([AbortSignal.timeout(timeoutMs), crawlAbortController.signal]);
+    }
+    return crawlAbortController.signal;
+  }
+
   const initialUrl = cleanAndNormalizeUrl(startUrl, startUrl);
   const htmlQueue = [initialUrl];
   const pdfQueue = [];
@@ -1670,88 +1705,6 @@ async function runProductionCrawl(crawlState) {
   const visitedUrls = new Set();
   const visitedPdfs = new Set();
   const visitedImages = new Set();
-
-  // Fast sitemap pre-discovery: seeds official corporate & catalog pages immediately
-  try {
-    const sitemapUrls = await probeSitemaps(baseOrigin);
-    for (const smUrl of sitemapUrls) {
-      const cUrl = cleanAndNormalizeUrl(smUrl, startUrl);
-      if (cUrl && isUrlInScope(cUrl, baseOrigin, baseHostname, includeSubdomains) && !enqueuedHtmlUrls.has(cUrl)) {
-        enqueuedHtmlUrls.add(cUrl);
-        if (HIGH_PRIORITY_REGEX.test(cUrl)) {
-          htmlQueue.unshift(cUrl);
-        } else if (htmlQueue.length < maxPages) {
-          htmlQueue.push(cUrl);
-        }
-      }
-    }
-  } catch (smErr) {
-    console.debug("Sitemap probe notice:", smErr);
-  }
-
-  // Deep URL Navigation Seeding:
-  // When starting on deep subpages (e.g., e-catalogs, flipbooks, deep product views like /en/e-catalog-253/All-Electric-Precise-Plunger-Machine.html),
-  // seed origin root (/), language section (/en/), and corporate contact/about pages
-  // so the crawler discovers the entire company domain and all email endpoints.
-  try {
-    const rawPath = startObj.pathname;
-    if (rawPath && rawPath !== "/" && rawPath !== "") {
-      const rootUrl = cleanAndNormalizeUrl(baseOrigin + "/", startUrl);
-      if (rootUrl && !enqueuedHtmlUrls.has(rootUrl)) {
-        enqueuedHtmlUrls.add(rootUrl);
-        htmlQueue.push(rootUrl);
-      }
-
-      // Check for language path prefix like /en/, /zh/, /tw/, /cn/, /es/, /de/, /fr/, /jp/
-      const langMatch = rawPath.match(/^\/([a-zA-Z]{2}(?:-[a-zA-Z]{2})?)(?:\/|$)/);
-      const langPrefix = langMatch ? `/${langMatch[1]}/` : "/";
-      if (langPrefix !== "/") {
-        const langUrl = cleanAndNormalizeUrl(baseOrigin + langPrefix, startUrl);
-        if (langUrl && !enqueuedHtmlUrls.has(langUrl)) {
-          enqueuedHtmlUrls.add(langUrl);
-          htmlQueue.push(langUrl);
-        }
-      }
-
-      const standardContactPaths = [
-        "contact.html", "contact-us.html", "contact_us.html", "contactus.html",
-        "contacts.html", "about.html", "about-us.html", "about_us.html", "aboutus.html",
-        "contact", "contact-us", "about", "about-us"
-      ];
-
-      for (const p of standardContactPaths) {
-        if (langPrefix !== "/") {
-          const lUrl = cleanAndNormalizeUrl(`${baseOrigin}${langPrefix}${p}`, startUrl);
-          if (lUrl && !enqueuedHtmlUrls.has(lUrl)) {
-            enqueuedHtmlUrls.add(lUrl);
-            htmlQueue.push(lUrl);
-          }
-        }
-        const rUrl = cleanAndNormalizeUrl(`${baseOrigin}/${p}`, startUrl);
-        if (rUrl && !enqueuedHtmlUrls.has(rUrl)) {
-          enqueuedHtmlUrls.add(rUrl);
-          htmlQueue.push(rUrl);
-        }
-      }
-    }
-  } catch (seedErr) {
-    console.debug("Deep seed notice:", seedErr);
-  }
-
-  // Ingest initial links from active tab DOM harvest if available
-  if (Array.isArray(initialLinks)) {
-    for (const rawL of initialLinks) {
-      const cUrl = cleanAndNormalizeUrl(rawL, startUrl);
-      if (cUrl && isUrlInScope(cUrl, baseOrigin, baseHostname, includeSubdomains) && !enqueuedHtmlUrls.has(cUrl)) {
-        enqueuedHtmlUrls.add(cUrl);
-        if (HIGH_PRIORITY_REGEX.test(cUrl)) {
-          htmlQueue.unshift(cUrl);
-        } else {
-          htmlQueue.push(cUrl);
-        }
-      }
-    }
-  }
 
   const discoveredPdfs = [];
   const discoveredImages = [];
@@ -1770,34 +1723,6 @@ async function runProductionCrawl(crawlState) {
   crawlState.visitedPdfs = visitedPdfs;
   crawlState.visitedImages = visitedImages;
   crawlState.pdfsAvailableCount = 0;
-
-  // Ingest initial findings from active tab DOM harvest
-  if (Array.isArray(initialFindings)) {
-    for (const f of initialFindings) {
-      if (f && f.email) {
-        const cleanEmails = normalizeAndExtractEmails(f.email);
-        for (const em of cleanEmails) {
-          const item = {
-            email: em,
-            sourceType: f.sourceType || "HTML (Live Tab)",
-            sourceUrl: f.sourceUrl || startUrl,
-            mainPageUrl: f.mainPageUrl || startUrl,
-            occurrences: 1,
-            sources: [
-              {
-                sourceType: f.sourceType || "HTML (Live Tab)",
-                sourceUrl: f.sourceUrl || startUrl,
-                mainPageUrl: f.mainPageUrl || startUrl,
-                timestamp: new Date().toISOString()
-              }
-            ]
-          };
-          findingsMap.set(em, item);
-          findings.push(item);
-        }
-      }
-    }
-  }
 
   // ── Multi-Source Email Recorder ──────────────────────────────────────
   function recordEmail(rawEmail, sourceUrl, sourceType, mainPageUrl) {
@@ -1898,6 +1823,9 @@ async function runProductionCrawl(crawlState) {
 
   function enqueueImageForOcr(rawImageUrl, sourcePage, isFromImageElement = true, imageContext = "", altText = "", titleText = "") {
     if (!ocrImages) return;
+    const maxSiteImages = skipProductDetailPages ? 25 : 50;
+    if (enqueuedImageUrls.size >= maxSiteImages) return;
+
     const imageUrl = getHighResImageUrl(rawImageUrl);
     if (!imageUrl) return;
     if (visitedImages.has(imageUrl) || enqueuedImageUrls.has(imageUrl)) return;
@@ -1936,6 +1864,140 @@ async function runProductionCrawl(crawlState) {
     });
   }
 
+  // Ingest initial findings from active tab DOM harvest
+  if (Array.isArray(initialFindings)) {
+    for (const f of initialFindings) {
+      if (f && f.email) {
+        const cleanEmails = normalizeAndExtractEmails(f.email);
+        for (const em of cleanEmails) {
+          const item = {
+            email: em,
+            sourceType: f.sourceType || "HTML (Live Tab)",
+            sourceUrl: f.sourceUrl || startUrl,
+            mainPageUrl: f.mainPageUrl || startUrl,
+            occurrences: 1,
+            sources: [
+              {
+                sourceType: f.sourceType || "HTML (Live Tab)",
+                sourceUrl: f.sourceUrl || startUrl,
+                mainPageUrl: f.mainPageUrl || startUrl,
+                timestamp: new Date().toISOString()
+              }
+            ]
+          };
+          findingsMap.set(em, item);
+          findings.push(item);
+        }
+      }
+    }
+  }
+
+  // Fast sitemap pre-discovery: seeds official corporate & catalog pages immediately
+  // CRITICAL FIX: Filters out PDF and image URLs directly into their respective queues
+  // so that PDF documents are never mistakenly crawled as HTML web pages
+  try {
+    const sitemapUrls = await probeSitemaps(baseOrigin, crawlAbortController.signal);
+    for (const smUrl of sitemapUrls) {
+      if (crawlState.aborted) break;
+      const cUrl = cleanAndNormalizeUrl(smUrl, startUrl);
+      if (cUrl && isUrlInScope(cUrl, baseOrigin, baseHostname, includeSubdomains)) {
+        if (isPotentialPdfUrl(cUrl) || cUrl.toLowerCase().endsWith(".pdf")) {
+          if (checkPdfs) enqueuePdf(cUrl, startUrl);
+          continue;
+        }
+        if (IMAGE_EXT_REGEX.test(cUrl)) {
+          if (ocrImages) enqueueImageForOcr(cUrl, startUrl);
+          continue;
+        }
+        if (!enqueuedHtmlUrls.has(cUrl)) {
+          enqueuedHtmlUrls.add(cUrl);
+          if (HIGH_PRIORITY_REGEX.test(cUrl)) {
+            htmlQueue.unshift(cUrl);
+          } else if (htmlQueue.length < maxPages) {
+            htmlQueue.push(cUrl);
+          }
+        }
+      }
+    }
+  } catch (smErr) {
+    console.debug("Sitemap probe notice:", smErr);
+  }
+
+  // Deep URL Navigation Seeding:
+  // When starting on deep subpages (e.g., e-catalogs, flipbooks, deep product views like /en/e-catalog-253/All-Electric-Precise-Plunger-Machine.html),
+  // seed origin root (/), language section (/en/), and corporate contact/about pages
+  // so the crawler discovers the entire company domain and all email endpoints.
+  try {
+    const rawPath = startObj.pathname;
+    if (rawPath && rawPath !== "/" && rawPath !== "") {
+      const rootUrl = cleanAndNormalizeUrl(baseOrigin + "/", startUrl);
+      if (rootUrl && !enqueuedHtmlUrls.has(rootUrl)) {
+        enqueuedHtmlUrls.add(rootUrl);
+        htmlQueue.push(rootUrl);
+      }
+
+      // Check for language path prefix like /en/, /zh/, /tw/, /cn/, /es/, /de/, /fr/, /jp/
+      const langMatch = rawPath.match(/^\/([a-zA-Z]{2}(?:-[a-zA-Z]{2})?)(?:\/|$)/);
+      const langPrefix = langMatch ? `/${langMatch[1]}/` : "/";
+      if (langPrefix !== "/") {
+        const langUrl = cleanAndNormalizeUrl(baseOrigin + langPrefix, startUrl);
+        if (langUrl && !enqueuedHtmlUrls.has(langUrl)) {
+          enqueuedHtmlUrls.add(langUrl);
+          htmlQueue.push(langUrl);
+        }
+      }
+
+      const standardContactPaths = [
+        "contact.html", "contact-us.html", "contact_us.html", "contactus.html",
+        "contacts.html", "about.html", "about-us.html", "about_us.html", "aboutus.html",
+        "contact", "contact-us", "about", "about-us"
+      ];
+
+      for (const p of standardContactPaths) {
+        if (langPrefix !== "/") {
+          const lUrl = cleanAndNormalizeUrl(`${baseOrigin}${langPrefix}${p}`, startUrl);
+          if (lUrl && !enqueuedHtmlUrls.has(lUrl)) {
+            enqueuedHtmlUrls.add(lUrl);
+            htmlQueue.push(lUrl);
+          }
+        }
+        const rUrl = cleanAndNormalizeUrl(`${baseOrigin}/${p}`, startUrl);
+        if (rUrl && !enqueuedHtmlUrls.has(rUrl)) {
+          enqueuedHtmlUrls.add(rUrl);
+          htmlQueue.push(rUrl);
+        }
+      }
+    }
+  } catch (seedErr) {
+    console.debug("Deep seed notice:", seedErr);
+  }
+
+  // Ingest initial links from active tab DOM harvest if available
+  if (Array.isArray(initialLinks)) {
+    for (const rawL of initialLinks) {
+      if (crawlState.aborted) break;
+      const cUrl = cleanAndNormalizeUrl(rawL, startUrl);
+      if (cUrl && isUrlInScope(cUrl, baseOrigin, baseHostname, includeSubdomains)) {
+        if (isPotentialPdfUrl(cUrl) || cUrl.toLowerCase().endsWith(".pdf")) {
+          if (checkPdfs) enqueuePdf(cUrl, startUrl);
+          continue;
+        }
+        if (IMAGE_EXT_REGEX.test(cUrl)) {
+          if (ocrImages) enqueueImageForOcr(cUrl, startUrl);
+          continue;
+        }
+        if (!enqueuedHtmlUrls.has(cUrl)) {
+          enqueuedHtmlUrls.add(cUrl);
+          if (HIGH_PRIORITY_REGEX.test(cUrl)) {
+            htmlQueue.unshift(cUrl);
+          } else {
+            htmlQueue.push(cUrl);
+          }
+        }
+      }
+    }
+  }
+
   async function processTask(currentItem, mode) {
     if (crawlState.aborted) return;
     const currentUrl = mode === "html" ? currentItem : currentItem.url;
@@ -1961,16 +2023,34 @@ async function runProductionCrawl(crawlState) {
       const mainSitePage = pdfRec ? pdfRec.sourcePage : currentUrl;
 
       try {
-        const res = await fetch(currentUrl, { credentials: "omit", headers: PDF_FETCH_HEADERS });
+        const res = await fetch(currentUrl, {
+          credentials: "omit",
+          headers: PDF_FETCH_HEADERS,
+          signal: createFetchSignal(5000)
+        });
         if (!res.ok) {
           if (pdfRec) pdfRec.status = `HTTP ${res.status}`;
           return;
         }
 
-        const buffer = await res.arrayBuffer();
+        const contentType = (res.headers.get("content-type") || "").toLowerCase();
+        if (contentType.includes("text/html")) {
+          if (pdfRec) pdfRec.status = "Skipped (HTML response)";
+          return;
+        }
 
-        // Base64 encode for PDF.js in popup (up to 15MB)
-        const base64Data = buffer.byteLength <= 15 * 1024 * 1024 ? arrayBufferToBase64(buffer) : "";
+        const buffer = await res.arrayBuffer();
+        if (buffer.byteLength < 50) {
+          if (pdfRec) pdfRec.status = "Skipped (Empty PDF)";
+          return;
+        }
+        if (buffer.byteLength > 25 * 1024 * 1024) {
+          if (pdfRec) pdfRec.status = "Skipped (>25MB)";
+          return;
+        }
+
+        // Base64 encode for PDF.js in popup (cap Base64 IPC payload to 3MB; larger streams directly)
+        const base64Data = buffer.byteLength <= 3 * 1024 * 1024 ? arrayBufferToBase64(buffer) : "";
 
         pdfsAvailableCount++;
         crawlState.pdfsAvailableCount = pdfsAvailableCount;
@@ -1983,8 +2063,10 @@ async function runProductionCrawl(crawlState) {
           numBytes: buffer.byteLength,
           ocrPdfs
         });
-      } catch {
-        if (pdfRec) pdfRec.status = "Access/Network Error";
+      } catch (pdfErr) {
+        if (pdfRec) {
+          pdfRec.status = crawlState.aborted ? "Stopped" : "Access/Network Error";
+        }
       }
     }
     // ── Process Discovered Website Image ─────────────────────────────
@@ -1998,11 +2080,19 @@ async function runProductionCrawl(crawlState) {
 
       try {
         if (imgRec) imgRec.status = "Downloading...";
-        let res = await fetch(currentUrl, { credentials: "omit", headers: IMAGE_FETCH_HEADERS });
+        let res = await fetch(currentUrl, {
+          credentials: "omit",
+          headers: IMAGE_FETCH_HEADERS,
+          signal: createFetchSignal(4000)
+        });
 
         // Fallback if high-res rewrite 404s
         if (!res.ok && currentUrl !== fallbackUrl) {
-          res = await fetch(fallbackUrl, { credentials: "omit", headers: IMAGE_FETCH_HEADERS });
+          res = await fetch(fallbackUrl, {
+            credentials: "omit",
+            headers: IMAGE_FETCH_HEADERS,
+            signal: createFetchSignal(4000)
+          });
         }
 
         if (!res.ok) {
@@ -2045,8 +2135,9 @@ async function runProductionCrawl(crawlState) {
           return;
         }
 
-        const base64 = arrayBufferToBase64(buffer);
-        const dataUrl = `data:${contentType || "image/jpeg"};base64,${base64}`;
+        // Only transfer Base64 dataUrl for images under 300KB; larger images load directly via imageUrl
+        const base64 = buffer.byteLength <= 300 * 1024 ? arrayBufferToBase64(buffer) : "";
+        const dataUrl = base64 ? `data:${contentType || "image/jpeg"};base64,${base64}` : null;
 
         if (imgRec) imgRec.status = "Scanning with OCR...";
         emitProcessImage({
@@ -2075,7 +2166,7 @@ async function runProductionCrawl(crawlState) {
         const res = await fetch(currentUrl, {
           credentials: "include",
           headers: STANDARD_FETCH_HEADERS,
-          signal: AbortSignal.timeout(4500)
+          signal: createFetchSignal(3500)
         });
         if (!res.ok) return;
 
@@ -2240,19 +2331,42 @@ async function runProductionCrawl(crawlState) {
 
   // ── True Concurrent Worker Pool ──────────────────────────────────────
   let activeWorkersCount = 0;
+  let activePdfWorkers = 0;
+  let activeImageWorkers = 0;
   let allWorkCompleted = false;
 
   function getNextTask() {
     if (crawlState.aborted) return null;
+
+    const poolSize = Math.max(1, concurrency || 8);
+    // Dynamic reservation: dedicate up to ~25% of pool to PDFs and up to ~25% to images
+    // so they are processed concurrently while HTML pages are being crawled
+    const maxPdfWorkers = Math.max(1, Math.min(3, Math.floor(poolSize / 3)));
+    const maxImageWorkers = Math.max(1, Math.min(2, Math.floor(poolSize / 4)));
+
+    // 1. Concurrent PDF task dispatch (won't starve behind 500 HTML pages)
+    if (checkPdfs && pdfQueue.length > 0 && activePdfWorkers < maxPdfWorkers) {
+      return { currentItem: pdfQueue.shift(), mode: "pdf" };
+    }
+
+    // 2. Concurrent Image OCR task dispatch
+    if (ocrImages && imageOcrQueue.length > 0 && activeImageWorkers < maxImageWorkers) {
+      return { currentItem: imageOcrQueue.shift(), mode: "image" };
+    }
+
+    // 3. Dispatch HTML page crawl
     if (htmlQueue.length > 0 && visitedUrls.size < maxPages) {
       return { currentItem: htmlQueue.shift(), mode: "html" };
     }
+
+    // 4. Drain remaining PDF & Image queues when HTML queue is empty or maxPages reached
     if (checkPdfs && pdfQueue.length > 0) {
       return { currentItem: pdfQueue.shift(), mode: "pdf" };
     }
     if (ocrImages && imageOcrQueue.length > 0) {
       return { currentItem: imageOcrQueue.shift(), mode: "image" };
     }
+
     return null;
   }
 
@@ -2275,12 +2389,17 @@ async function runProductionCrawl(crawlState) {
       }
 
       activeWorkersCount++;
+      if (task.mode === "pdf") activePdfWorkers++;
+      else if (task.mode === "image") activeImageWorkers++;
+
       try {
         await processTask(task.currentItem, task.mode);
       } catch (err) {
         console.warn("Worker error:", err);
       } finally {
         activeWorkersCount--;
+        if (task.mode === "pdf") activePdfWorkers--;
+        else if (task.mode === "image") activeImageWorkers--;
       }
     }
   }

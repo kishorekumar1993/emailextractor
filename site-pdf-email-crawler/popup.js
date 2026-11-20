@@ -66,6 +66,8 @@ let currentWarnings = []; // Image-only restriction warnings (never stop crawl)
 let activeTab = "emails";
 let isCrawling = false;
 let ocrWorker = null;
+let ocrWorkerPromise = null;
+let ocrQueueChain = Promise.resolve();
 
 // Configure PDF.js worker
 if (typeof pdfjsLib !== "undefined") {
@@ -217,35 +219,67 @@ function base64ToUint8Array(base64) {
   return bytes;
 }
 
-// Initialize offline Tesseract OCR worker with fast recognition parameters
+// Initialize offline Tesseract OCR worker with singleton promise (prevents duplicate worker spawn)
 async function getOcrWorker() {
   if (ocrWorker) return ocrWorker;
+  if (ocrWorkerPromise) return ocrWorkerPromise;
   if (typeof Tesseract === "undefined") {
     throw new Error("Tesseract.js library is not available in popup context");
   }
 
-  try {
-    ocrWorker = await Tesseract.createWorker("eng", 1, {
-      workerPath: chrome.runtime.getURL("lib/worker.min.js"),
-      corePath: chrome.runtime.getURL("lib/tesseract-core-simd-lstm.wasm.js"),
-      langPath: chrome.runtime.getURL("lib"),
-      workerBlobURL: false,
-      errorHandler: (err) => {
-        console.warn("Tesseract worker notice:", err);
-      }
-    });
-    // Speedup: Disable heavy dictionary dawg graph search to speed up OCR by 2x-3x
+  ocrWorkerPromise = (async () => {
     try {
-      await ocrWorker.setParameters({
-        load_system_dawg: "0",
-        load_freq_dawg: "0"
+      const worker = await Tesseract.createWorker("eng", 1, {
+        workerPath: chrome.runtime.getURL("lib/worker.min.js"),
+        corePath: chrome.runtime.getURL("lib/tesseract-core-simd-lstm.wasm.js"),
+        langPath: chrome.runtime.getURL("lib"),
+        workerBlobURL: false,
+        errorHandler: (err) => {
+          console.warn("Tesseract worker notice:", err);
+        }
       });
-    } catch {}
-    return ocrWorker;
-  } catch (err) {
-    console.error("Tesseract OCR initialization failed:", err);
-    throw err;
-  }
+      // Speedup: Disable heavy dictionary dawg graph search to speed up OCR by 2x-3x
+      try {
+        await worker.setParameters({
+          load_system_dawg: "0",
+          load_freq_dawg: "0"
+        });
+      } catch {}
+      ocrWorker = worker;
+      return worker;
+    } catch (err) {
+      ocrWorkerPromise = null;
+      console.error("Tesseract OCR initialization failed:", err);
+      throw err;
+    }
+  })();
+
+  return ocrWorkerPromise;
+}
+
+// Mutex-serialized OCR execution with safety timeout: prevents thread collision and UI hang
+function runOcrRecognize(imageSource) {
+  ocrQueueChain = ocrQueueChain.then(async () => {
+    if (!isCrawling) return { text: "" };
+    // Yield to the UI thread event loop so user actions (like Stop) remain instantaneous
+    await new Promise((r) => setTimeout(r, 20));
+    if (!isCrawling) return { text: "" };
+
+    const worker = await getOcrWorker();
+    if (!worker) return { text: "" };
+
+    const ocrPromise = worker.recognize(imageSource);
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("OCR timeout (10s)")), 10000)
+    );
+    const ret = await Promise.race([ocrPromise, timeoutPromise]);
+    return { text: ret && ret.data ? ret.data.text || "" : "" };
+  }).catch((err) => {
+    console.warn("OCR recognize notice:", err.message);
+    return { text: "" };
+  });
+
+  return ocrQueueChain;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -985,14 +1019,14 @@ function enqueuePdfForProcessing(task) {
   processPdfQueue();
 }
 
-const PDF_CONCURRENCY = 3;
+const PDF_CONCURRENCY = 1;
 async function processPdfQueue() {
   if (isProcessingPdfQueue) return;
   isProcessingPdfQueue = true;
 
   const running = new Set();
-  while (pdfProcessingQueue.length > 0 || running.size > 0) {
-    while (pdfProcessingQueue.length > 0 && running.size < PDF_CONCURRENCY) {
+  while ((pdfProcessingQueue.length > 0 || running.size > 0) && isCrawling) {
+    while (pdfProcessingQueue.length > 0 && running.size < PDF_CONCURRENCY && isCrawling) {
       const task = pdfProcessingQueue.shift();
       if (!task || processedPdfUrls.has(task.pdfUrl)) continue;
       processedPdfUrls.add(task.pdfUrl);
@@ -1009,11 +1043,14 @@ async function processPdfQueue() {
   ocrStatus.style.display = "none";
 
   if (!isCrawling && !isProcessingImageQueue) {
-    statusText.textContent = `Completed! Extracted ${currentFindings.length} unique emails from ${statPages.textContent} pages, ${currentPdfs.length} PDFs & ${currentImages.length} images.`;
+    if (statusText.textContent !== "Crawl stopped by user.") {
+      statusText.textContent = `Completed! Extracted ${currentFindings.length} unique emails from ${statPages.textContent} pages, ${currentPdfs.length} PDFs & ${currentImages.length} images.`;
+    }
   }
 }
 
 async function handleProcessPdf({ pdfUrl, mainPageUrl, base64Data, ocrPdfs }) {
+  if (!isCrawling) return;
   const fileName = pdfUrl.split("/").pop() || "document.pdf";
   try {
     ocrStatus.style.display = "flex";
@@ -1045,6 +1082,7 @@ async function handleProcessPdf({ pdfUrl, mainPageUrl, base64Data, ocrPdfs }) {
       }
     }
 
+    if (!isCrawling) return;
     const loadingTask = pdfjsLib.getDocument({ data: rawBytes });
     const pdf = await loadingTask.promise;
     const numPages = pdf.numPages;
@@ -1053,6 +1091,7 @@ async function handleProcessPdf({ pdfUrl, mainPageUrl, base64Data, ocrPdfs }) {
     const shouldOcr = ocrPdfs !== false && ocrImagesCheckbox.checked;
 
     for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+      if (!isCrawling) break;
       ocrStatus.textContent = `📄 PDF.js: Reading page ${pageNum}/${numPages} of ${fileName}...`;
       const page = await pdf.getPage(pageNum);
       const textContent = await page.getTextContent();
@@ -1115,7 +1154,13 @@ async function handleProcessPdf({ pdfUrl, mainPageUrl, base64Data, ocrPdfs }) {
 
       if (isCandidateForOcr) {
         ocrStatus.textContent = `🔍 OCR: Scanning page ${pageNum}/${numPages} canvas for ${fileName}...`;
-        const viewport = page.getViewport({ scale: 1.0 });
+        const rawViewport = page.getViewport({ scale: 1.0 });
+        // Scale down to max 900px dimension: 10x faster OCR and 90% less memory usage
+        const maxDim = 900;
+        const currentMax = Math.max(rawViewport.width, rawViewport.height);
+        const scale = currentMax > maxDim ? maxDim / currentMax : 1.0;
+        const viewport = page.getViewport({ scale });
+
         const canvas = document.createElement("canvas");
         canvas.width = Math.floor(viewport.width);
         canvas.height = Math.floor(viewport.height);
@@ -1125,17 +1170,12 @@ async function handleProcessPdf({ pdfUrl, mainPageUrl, base64Data, ocrPdfs }) {
         // Visual analysis of page pixels (warning only)
         const visualResult = analyzeCanvasVisualContent(canvas);
 
-        const worker = await getOcrWorker();
-        if (!worker) {
-          throw new Error("Tesseract OCR worker initialization failed");
-        }
-
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.80);
         canvas.width = 0;
         canvas.height = 0;
 
-        const ocrRet = await worker.recognize(dataUrl);
-        const ocrText = ocrRet.data ? ocrRet.data.text || "" : "";
+        const ocrRet = await runOcrRecognize(dataUrl);
+        const ocrText = ocrRet.text || "";
         const ocrEmails = normalizeAndExtractEmails(ocrText);
         for (const email of ocrEmails) {
           emailsFoundInDoc++;
@@ -1194,14 +1234,14 @@ function enqueueImageForProcessing(task) {
   processImageQueue();
 }
 
-const IMAGE_CONCURRENCY = 2;
+const IMAGE_CONCURRENCY = 1;
 async function processImageQueue() {
   if (isProcessingImageQueue) return;
   isProcessingImageQueue = true;
 
   const running = new Set();
-  while (imageProcessingQueue.length > 0 || running.size > 0) {
-    while (imageProcessingQueue.length > 0 && running.size < IMAGE_CONCURRENCY) {
+  while ((imageProcessingQueue.length > 0 || running.size > 0) && isCrawling) {
+    while (imageProcessingQueue.length > 0 && running.size < IMAGE_CONCURRENCY && isCrawling) {
       const task = imageProcessingQueue.shift();
       if (!task || processedImageUrls.has(task.imageUrl)) continue;
       processedImageUrls.add(task.imageUrl);
@@ -1218,11 +1258,14 @@ async function processImageQueue() {
   ocrStatus.style.display = "none";
 
   if (!isCrawling && !isProcessingPdfQueue) {
-    statusText.textContent = `Completed! Extracted ${currentFindings.length} unique emails from ${statPages.textContent} pages, ${currentPdfs.length} PDFs & ${currentImages.length} images.`;
+    if (statusText.textContent !== "Crawl stopped by user.") {
+      statusText.textContent = `Completed! Extracted ${currentFindings.length} unique emails from ${statPages.textContent} pages, ${currentPdfs.length} PDFs & ${currentImages.length} images.`;
+    }
   }
 }
 
 async function handleProcessImageOcr({ imageUrl, mainPageUrl, dataUrl, imageContext, altText, titleText }) {
+  if (!isCrawling) return;
   const fileName = imageUrl.split("/").pop() || "image.jpg";
   try {
     ocrStatus.style.display = "flex";
@@ -1298,12 +1341,9 @@ async function handleProcessImageOcr({ imageUrl, mainPageUrl, dataUrl, imageCont
 
         // Only run heavy Tesseract OCR if text strokes were detected
         if (hasTextClues) {
-          const worker = await getOcrWorker();
-          if (worker) {
-            const ret = await worker.recognize(optimizedDataUrl);
-            text = ret.data ? ret.data.text || "" : "";
-            emails = normalizeAndExtractEmails(text);
-          }
+          const ret = await runOcrRecognize(optimizedDataUrl);
+          text = ret.text || "";
+          emails = normalizeAndExtractEmails(text);
         }
       }
     } catch (renderErr) {
@@ -1591,15 +1631,16 @@ startBtn.addEventListener("click", async () => {
 
 // Stop Crawl
 stopBtn.addEventListener("click", () => {
-  stopBtn.disabled = true;
+  isCrawling = false;
   stopHeartbeat();
-  statusText.textContent = "Stopping crawler...";
-  chrome.runtime.sendMessage({ type: "STOP_CRAWL" }, () => {
-    stopBtn.disabled = false;
-    stopBtn.style.display = "none";
-    startBtn.style.display = "inline-flex";
-    isCrawling = false;
-  });
+  pdfProcessingQueue.length = 0;
+  imageProcessingQueue.length = 0;
+  stopBtn.style.display = "none";
+  startBtn.style.display = "inline-flex";
+  statusText.textContent = "Crawl stopped by user.";
+  ocrStatus.style.display = "none";
+  updateActionButtons();
+  chrome.runtime.sendMessage({ type: "STOP_CRAWL" }, () => {});
 });
 
 // UNIFIED COPY ALL: Emails + PDFs + Images with Multi-Source URLs
