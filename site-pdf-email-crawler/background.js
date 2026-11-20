@@ -15,13 +15,18 @@ const IMAGE_EXT_REGEX = /\.(png|jpe?g|webp|bmp|tiff?)(\?.*)?$/i;
 // Transactional and checkout paths to skip (including Cloudflare internal paths)
 const IGNORE_PATH_REGEX = /\/(?:cart|checkout|basket|my-account|wishlist|login|signin|signup|register|account|password|reset|auth|wp-admin|wp-json|xmlrpc|ajax|feed|rss|atom|cdn-cgi)(?:\/|$|\?)/i;
 
-// Priority high-value pages likely to contain company contact emails
-const HIGH_PRIORITY_REGEX = /\/(?:contact(?:[-_]?us)?|about(?:[-_]?us)?|reach[-_]?us|get[-_]?in[-_]?touch|support|team|staff|help|imprint|impressum|terms|privacy|legal|info|catalog|catalogue)(?:\/|$|\?|\.|\b)/i;
+// Priority high-value pages likely to contain company contact emails (multilingual + corporate + catalogs)
+const HIGH_PRIORITY_REGEX = /\/(?:contact(?:[-_]?(?:us|me|details))?|kontakt|contacto|contatti|contactos|contactus|about(?:[-_]?(?:us|me))?|reach[-_]?us|get[-_]?in[-_]?touch|feedback|inquiry|enquiry|support|customer[-_]?service|corporate|company|management|directors|leadership|who[-_]?we[-_]?are|team|staff|help|imprint|impressum|locations?|branches|offices?|find[-_]?us|where[-_]?to[-_]?buy|distributors?|dealers?|partners?|sales|order|service|faq|help[-_]?center|terms|privacy|legal|info|catalog|catalogue|e-catalog|brochure)(?:\/|$|\?|\.|\b)/i;
 
 const STANDARD_FETCH_HEADERS = {
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
-  "Cache-Control": "no-cache"
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "same-origin",
+  "Sec-Fetch-User": "?1",
+  "Upgrade-Insecure-Requests": "1",
+  "Cache-Control": "max-age=0"
 };
 
 const PDF_FETCH_HEADERS = {
@@ -370,8 +375,8 @@ function emitSiteRestricted(siteRecord) {
 // 2. PRODUCT IMAGE EXCLUSION & CORPORATE WHITELIST
 // ═══════════════════════════════════════════════════════════════════════
 
-// Corporate Whitelist: Always ALLOW company logos, banners, brochures, catalogs, certificates, etc.
-const CORPORATE_WHITELIST_REGEX = /\b(?:logo|brand|site-logo|header-logo|company-logo|about|company|corporate|profile|mission|team|staff|office|facility|hq|contact|reach|address|location|enquiry|support|banner|hero|slider|slide|carousel|billboard|promo|promotion|announcement|header-bg|footer-bg|brochure|catalog|catalogue|flyer|poster|pamphlet|leaflet|prospectus|showcase|showcase-cover|pdf-cover|cover|cert|certificate|certification|iso|award|patent|license|accreditation|compliance|document)\b/i;
+// Corporate Whitelist: Always ALLOW company logos, banners, brochures, catalogs, e-catalogs, flipbook pages, certificates, etc.
+const CORPORATE_WHITELIST_REGEX = /\b(?:logo|brand|site-logo|header-logo|company-logo|about|company|corporate|profile|mission|team|staff|office|facility|hq|contact|reach|address|location|enquiry|support|banner|hero|slider|slide|carousel|billboard|promo|promotion|announcement|header-bg|footer-bg|brochure|catalog|catalogue|e-catalog|ecat|ecp|flipbook|page|pages|flyer|poster|pamphlet|leaflet|prospectus|showcase|showcase-cover|pdf-cover|cover|cert|certificate|certification|iso|award|patent|license|accreditation|compliance|document)\b/i;
 
 // Non-OCR graphics regex: icons, social media, payment badges, UI controls to skip from heavy OCR
 const NON_OCR_GRAPHIC_REGEX = /\b(?:icon|icons|social|facebook|twitter|instagram|linkedin|youtube|pinterest|tiktok|whatsapp|wechat|line|telegram|payment|visa|mastercard|paypal|amex|applepay|gpay|stripe|cart|basket|search|magnifier|chevron|caret|arrow|bullet|avatar|divider|rating|star|stars|badge|btn|button|close|cross|menu|hamburger|playstore|appstore|google-play|app-store|flag|flags)\b/i;
@@ -720,7 +725,7 @@ function extractImageUrls(html, baseUrl, skipProductDetails = true) {
     const context = extractImageContext(sanitizedHtml, m.index);
 
     addImage(u, altMatch ? altMatch[1] : "", titleMatch ? titleMatch[1] : "", context);
-    if (imageMap.size >= 25) break;
+    if (imageMap.size >= 8) break;
   }
 
   // 2. <source srcset="..."> and <img srcset="...">
@@ -733,8 +738,10 @@ function extractImageUrls(html, baseUrl, skipProductDetails = true) {
       const imageUrl = candidate.trim().split(/\s+/)[0];
       if (imageUrl && !imageUrl.startsWith("data:") && !isProductItemImage(m[0], imageUrl, skipProductDetails)) {
         addImage(imageUrl);
+        if (imageMap.size >= 8) break;
       }
     }
+    if (imageMap.size >= 8) break;
   }
 
   // 3. CSS background-image in style attributes and inline styles
@@ -744,6 +751,7 @@ function extractImageUrls(html, baseUrl, skipProductDetails = true) {
     if (rawUrl && !rawUrl.startsWith("data:") && (rawUrl.startsWith("http") || rawUrl.startsWith("/") || rawUrl.startsWith("./"))) {
       if (!isProductItemImage("", rawUrl, skipProductDetails)) {
         addImage(rawUrl);
+        if (imageMap.size >= 8) break;
       }
     }
   }
@@ -757,6 +765,17 @@ function extractImageUrls(html, baseUrl, skipProductDetails = true) {
     }
   }
 
+  // 5. Digital E-Catalogs, Flipbooks, and Brochures (e.g. flipBook({ pages: [...] }), dflip, flowpaper)
+  const catalogPageRegex = /(?:["'](?:src|thumb|url|file|page)["']\s*:\s*["']([^"']+\.(?:jpe?g|png|webp|avif)[^"']*)["']|["']([^"']*(?:upimage|catalog|brochure|flyer|ecp)[^"']*\.(?:jpe?g|png|webp))["'])/gi;
+  let mCat;
+  while ((mCat = catalogPageRegex.exec(html)) !== null) {
+    const rawUrl = (mCat[1] || mCat[2] || "").trim();
+    if (rawUrl && !rawUrl.startsWith("data:")) {
+      addImage(rawUrl, "E-Catalog Page", "E-Catalog", "e-catalog-page");
+      if (imageMap.size >= 12) break;
+    }
+  }
+
   return Array.from(imageMap.values());
 }
 
@@ -765,14 +784,14 @@ function extractAllLinksAndText(html) {
   const rawLinks = [];
   const directPdfCandidates = new Set();
 
-  // 1. Regular <a> links
-  const aRegex = /<a\b([^>]*)>(.*?)<\/a>/gis;
+  // 1. Regular <a> links (matches even if </a> is missing or malformed)
+  const aRegex = /<a\b([^>]*)>(?:([\s\S]*?)<\/a>)?/gi;
   let aMatch;
   while ((aMatch = aRegex.exec(html)) !== null) {
     const attrs = aMatch[1] || "";
     const innerText = aMatch[2] || "";
 
-    const hrefMatch = attrs.match(/\b(?:href|data-href|data-url)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    const hrefMatch = attrs.match(/\b(?:href|data-href|data-url|data-target)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
     const href = hrefMatch ? hrefMatch[1] || hrefMatch[2] || hrefMatch[3] : "";
     if (href) {
       const trimmedHref = href.trim().replace(/[\\'"\s]+$/, "");
@@ -790,14 +809,14 @@ function extractAllLinksAndText(html) {
     }
   }
 
-  // 2. Embedded objects / iframes / embeds
-  const embeddedRegex = /<(?:iframe|embed|object)\b[^>]*(?:\bsrc|\bdata)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>/gi;
+  // 2. Embedded objects / iframes / embeds / links
+  const embeddedRegex = /<(?:iframe|embed|object|link)\b[^>]*(?:\bsrc|\bdata|\bhref)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>/gi;
   let embMatch;
   while ((embMatch = embeddedRegex.exec(html)) !== null) {
     const src = embMatch[1] || embMatch[2] || embMatch[3] || "";
     if (src) {
       const trimmedSrc = src.trim().replace(/[\\'"\s]+$/, "");
-      if (trimmedSrc && !trimmedSrc.startsWith("javascript:")) {
+      if (trimmedSrc && !trimmedSrc.startsWith("javascript:") && !trimmedSrc.startsWith("#")) {
         rawLinks.push(trimmedSrc);
         if (isPotentialPdfUrl(trimmedSrc)) {
           directPdfCandidates.add(trimmedSrc);
@@ -806,7 +825,26 @@ function extractAllLinksAndText(html) {
     }
   }
 
-  // 3. Next.js, Nuxt, React SPA router paths and JSON-LD paths:
+  // 3. Generic element attributes: data-href, data-url, onclick location.href
+  const genericAttrRegex = /\b(?:data-href|data-url|data-target|data-link)\s*=\s*["']([^"']+)["']/gi;
+  let gaMatch;
+  while ((gaMatch = genericAttrRegex.exec(html)) !== null) {
+    const gUrl = (gaMatch[1] || "").trim();
+    if (gUrl && !gUrl.startsWith("javascript:") && !gUrl.startsWith("#")) {
+      rawLinks.push(gUrl);
+    }
+  }
+
+  const jsNavRegex = /(?:location\.href|window\.open)\s*=\s*['"]([^'"]+)['"]/gi;
+  let jnMatch;
+  while ((jnMatch = jsNavRegex.exec(html)) !== null) {
+    const nUrl = (jnMatch[1] || "").trim();
+    if (nUrl && !nUrl.startsWith("javascript:") && !nUrl.startsWith("#")) {
+      rawLinks.push(nUrl);
+    }
+  }
+
+  // 4. Next.js, Nuxt, React SPA router paths and JSON-LD paths:
   // Unescape JSON strings so \"\/contact-us\" becomes "/contact-us"
   const unescapedHtml = html.replace(/\\(["'/\\bfnrtv])/g, "$1");
   const jsonPathRegex = /"(?:\/|https?:\/\/)[a-zA-Z0-9_\-\.~/]+"/g;
@@ -832,7 +870,7 @@ function extractAllLinksAndText(html) {
     }
   }
 
-  // 4. Schema.org JSON-LD Structured Data extraction (harvests organization emails and sameAs / url links)
+  // 5. Schema.org JSON-LD Structured Data extraction (harvests organization emails and sameAs / url links)
   const jsonLdRegex = /<script\b[^>]*\btype=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   let jsonLdMatch;
   while ((jsonLdMatch = jsonLdRegex.exec(html)) !== null) {
@@ -860,7 +898,7 @@ function extractAllLinksAndText(html) {
 // 4. STRICT EMAIL VALIDATION & EXTRACTION
 // ═══════════════════════════════════════════════════════════════════════
 
-// Recognized valid TLDs (top generic + modern + all ISO country codes)
+// Recognized valid TLDs (top generic + modern + business + all ISO country codes)
 const VALID_TLDS = new Set([
   // Common generic and modern gTLDs
   "com", "org", "net", "edu", "gov", "mil", "int", "info", "biz", "name", "pro",
@@ -871,6 +909,16 @@ const VALID_TLDS = new Set([
   "top", "vip", "xyz", "icu", "click", "fit", "fun", "press", "website", "pub",
   "casa", "ltd", "chat", "law", "bio", "me", "tv", "cc", "eu", "la", "mobi",
   "asia", "cat", "jobs", "tel", "travel", "design", "email", "cloud",
+  "gmbh", "llc", "inc", "corp", "holdings", "ventures", "capital", "finance",
+  "management", "consulting", "marketing", "engineering", "software", "technology",
+  "security", "international", "enterprises", "academy", "university", "institute",
+  "education", "training", "foundation", "charity", "community", "direct", "directory",
+  "logistics", "delivery", "express", "transport", "trade", "industries", "equipment",
+  "supplies", "parts", "repair", "events", "catering", "restaurant", "cafe", "hotel",
+  "properties", "estate", "realty", "realtor", "house", "home", "construction",
+  "builders", "cleaning", "plumbing", "energy", "solar", "eco", "green", "clinic",
+  "dental", "doctor", "hospital", "healthcare", "fitness", "beauty", "salon", "spa",
+  "luxury", "fashion", "boutique", "jewelry", "photography", "photos", "video",
   // Standard two-letter ISO country code ccTLDs
   "ac", "ad", "ae", "af", "ag", "al", "am", "ao", "aq", "ar", "as", "at", "au",
   "aw", "ax", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bm",
@@ -892,18 +940,53 @@ const VALID_TLDS = new Set([
   "vg", "vi", "vn", "vu", "ws", "ye", "za", "zm", "zw"
 ]);
 
+const BAD_ASSET_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "webp", "gif", "svg", "bmp", "ico", "tiff", "tif",
+  "css", "js", "mjs", "cjs", "jsx", "ts", "tsx", "json", "xml", "wasm", "map",
+  "vue", "php", "py", "cpp", "java", "rb", "go", "rs", "c", "h", "html", "htm",
+  "pdf", "zip", "tar", "gz", "rar", "7z", "bz2", "mp4", "mp3", "wav", "webm",
+  "avi", "ogg", "ogv", "flac", "aac", "woff", "woff2", "ttf", "eot", "otf",
+  "bin", "dat", "exe", "dmg", "apk", "iso", "bak", "tmp", "log", "txt", "csv", "md"
+]);
+
+const DUMMY_EMAILS = new Set([
+  "test@test.com", "example@example.com", "user@domain.com", "name@company.com",
+  "someone@example.com", "sample@sample.com", "admin@domain.com", "email@email.com",
+  "user@example.com", "email@example.com", "name@example.com", "yourname@email.com",
+  "username@domain.com", "first.last@domain.com"
+]);
+
+function safeAtob(b64) {
+  try {
+    if (typeof atob === "function") return atob(b64);
+    if (typeof Buffer !== "undefined") return Buffer.from(b64, "base64").toString("utf-8");
+  } catch {}
+  return "";
+}
+
+function cleanEmailToken(str) {
+  if (!str) return "";
+  return String(str)
+    .trim()
+    .toLowerCase()
+    .replace(/^mailto:\s*/i, "")
+    .replace(/^[^a-z0-9]+/, "")
+    .replace(/[^a-z0-9]+$/, "");
+}
+
 function isValidEmail(email) {
-  if (!email || email.length < 6 || email.length > 254) return false;
-  const atParts = email.split("@");
+  if (!email || typeof email !== "string") return false;
+  const clean = email.trim().toLowerCase();
+  if (clean.length < 5 || clean.length > 254) return false;
+
+  const atParts = clean.split("@");
   if (atParts.length !== 2) return false;
   const [local, domain] = atParts;
-  if (!local || local.length < 2 || local.length > 64 || !domain) return false;
+  if (!local || local.length < 1 || local.length > 64 || !domain) return false;
 
-  // Local part checks: must start and end with alphanumeric, no consecutive dots/symbols
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._%+-]*[a-zA-Z0-9]$/.test(local)) return false;
-  if (local.includes("..") || local.includes("__") || local.includes("--")) return false;
-  // Disallow pure numeric local parts unless >= 4 digits
-  if (/^\d+$/.test(local) && local.length < 4) return false;
+  // Local part checks: alphanumeric at start/end, valid characters, no consecutive dots
+  if (!/^[a-z0-9](?:[a-z0-9._%+-]*[a-z0-9])?$/.test(local)) return false;
+  if (local.includes("..")) return false;
 
   // Domain checks
   if (!domain.includes(".") || domain.startsWith(".") || domain.endsWith(".")) return false;
@@ -913,33 +996,25 @@ function isValidEmail(email) {
   for (const label of domainLabels) {
     if (!label || label.length > 63) return false;
     if (label.startsWith("-") || label.endsWith("-")) return false;
-    if (!/^[a-zA-Z0-9-]+$/.test(label)) return false;
+    if (!/^[a-z0-9-]+$/.test(label)) return false;
   }
 
   // Second-Level Domain (SLD) check: label immediately preceding TLD
-  const sld = domainLabels[domainLabels.length - 2].toLowerCase();
-  // Reject single-character SLDs (e.g. "0.yl", "j.xbr") unless single-letter on .com
-  if (sld.length < 2) {
-    const tldCandidate = domainLabels[domainLabels.length - 1].toLowerCase();
-    if (tldCandidate !== "com" || !/^[a-zA-Z]$/.test(sld)) return false;
-  }
-  // Reject SLDs that are pure digits (e.g. "0.com", "123.net")
-  if (/^\d+$/.test(sld)) return false;
+  const sld = domainLabels[domainLabels.length - 2];
+  if (sld.length < 1) return false;
 
-  // TLD check: must be recognized valid TLD
-  const tld = domainLabels[domainLabels.length - 1].toLowerCase();
-  if (!VALID_TLDS.has(tld)) return false;
+  // Strict TLD check: must be a recognized ICANN TLD or punycode (rejects fake TLDs like .word)
+  const tld = domainLabels[domainLabels.length - 1];
+  const isPunycode = tld.startsWith("xn--") && tld.length >= 5;
+  const isKnownTld = VALID_TLDS.has(tld);
+
+  if (!isKnownTld && !isPunycode) return false;
 
   // Asset extension reject
-  const badExtensions = /\.(png|jpe?g|webp|gif|svg|bmp|ico|tiff?|css|js|jsx|ts|tsx|woff2?|ttf|eot|pdf|zip|gz|tar|rar|mp4|webm|avi|mp3|wav|xml|json|wasm|bin|dat)$/i;
-  if (badExtensions.test(email)) return false;
+  if (BAD_ASSET_EXTENSIONS.has(tld)) return false;
 
   // Dummy placeholder emails reject
-  const dummyEmails = new Set([
-    "test@test.com", "example@example.com", "user@domain.com", "name@company.com",
-    "someone@example.com", "sample@sample.com", "admin@domain.com", "email@email.com"
-  ]);
-  if (dummyEmails.has(email.toLowerCase())) return false;
+  if (DUMMY_EMAILS.has(clean)) return false;
 
   return true;
 }
@@ -968,75 +1043,175 @@ function normalizeAndExtractEmails(rawText) {
   const rawStr = String(rawText);
 
   // 1. Cloudflare Email Protection Deobfuscation
-  // Detects data-cfemail="..." and /cdn-cgi/l/email-protection#...
-  const cfEmailRegex = /(?:data-cfemail=["']([0-9a-fA-F]+)["']|\/cdn-cgi\/l\/email-protection(?:#|\?)([0-9a-fA-F]+))/gi;
+  const cfEmailRegex = /(?:data-cfemail\s*=\s*["']?([0-9a-fA-F]{4,})["']?|\/cdn-cgi\/l\/email-protection(?:#|\?|%23)([0-9a-fA-F]{4,}))/gi;
   let cfMatch;
   while ((cfMatch = cfEmailRegex.exec(rawStr)) !== null) {
     const hex = cfMatch[1] || cfMatch[2];
     const decoded = decodeCloudflareEmail(hex);
     if (decoded) {
-      const cleanDecoded = decoded.trim().toLowerCase().replace(/^[^\w]+/, "").replace(/[^\w]+$/, "");
+      const cleanDecoded = cleanEmailToken(decoded);
       if (isValidEmail(cleanDecoded)) {
         found.add(cleanDecoded);
       }
     }
   }
 
-  // 2. Base64 Encoded Email Data Attributes (e.g. data-email="...", data-mail="...", data-contact="...")
-  const b64AttrRegex = /\bdata-(?:email|mail|contact|encoded)\s*=\s*["']([a-zA-Z0-9+/=]{8,120})["']/gi;
-  let b64Match;
-  while ((b64Match = b64AttrRegex.exec(rawStr)) !== null) {
-    try {
-      const decoded = atob(b64Match[1]).trim().toLowerCase().replace(/^[^\w]+/, "").replace(/[^\w]+$/, "");
-      if (isValidEmail(decoded)) {
-        found.add(decoded);
+  // 2. Data Attributes (Plain Text + Base64)
+  const dataAttrRegex = /\bdata-(?:email|mail|contact|encoded|address|mailto|recipient|user-email)\s*=\s*["']([^"']{5,160})["']/gi;
+  let dataMatch;
+  while ((dataMatch = dataAttrRegex.exec(rawStr)) !== null) {
+    const val = dataMatch[1].trim();
+    if (val.includes("@")) {
+      const cleanVal = cleanEmailToken(val);
+      if (isValidEmail(cleanVal)) found.add(cleanVal);
+    }
+    if (/^[a-zA-Z0-9+/=]{6,160}$/.test(val) && !val.includes("@")) {
+      const decoded = safeAtob(val);
+      if (decoded) {
+        const cleanDecoded = cleanEmailToken(decoded);
+        if (isValidEmail(cleanDecoded)) found.add(cleanDecoded);
       }
-    } catch {}
+    }
   }
 
-  // 3. Decode all HTML Decimal Entities (&#105;) and Hex Entities (&#x69;)
-  let text = rawStr
-    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    // Decode URI component escapes like %40, %2e
+  // Split attributes: data-user="..." data-domain="..."
+  const userDomainRegex = /(?:data-(?:user|name)\s*=\s*["']([^"']+)["'][^>]*data-domain\s*=\s*["']([^"']+)["']|data-domain\s*=\s*["']([^"']+)["'][^>]*data-(?:user|name)\s*=\s*["']([^"']+)["'])/gi;
+  let udMatch;
+  while ((udMatch = userDomainRegex.exec(rawStr)) !== null) {
+    const user = (udMatch[1] || udMatch[4] || "").trim();
+    const dom = (udMatch[2] || udMatch[3] || "").trim();
+    if (user && dom) {
+      const candidate = cleanEmailToken(`${user}@${dom}`);
+      if (isValidEmail(candidate)) found.add(candidate);
+    }
+  }
+
+  // 3. JavaScript Email Concat & Helpers
+  const jsConcatRegex = /["']([a-zA-Z0-9._%+-]+)["']\s*\+\s*["']@["']\s*\+\s*["']([a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})["']/gi;
+  let jscMatch;
+  while ((jscMatch = jsConcatRegex.exec(rawStr)) !== null) {
+    const em = cleanEmailToken(`${jscMatch[1]}@${jscMatch[2]}`);
+    if (isValidEmail(em)) found.add(em);
+  }
+
+  const jsMailFnRegex = /\b(?:mailTo|sendMail|contactMail|createMail)\s*\(\s*["']([^"']+)["']\s*,\s*["']([^"']+)["']\s*\)/gi;
+  let jsmMatch;
+  while ((jsmMatch = jsMailFnRegex.exec(rawStr)) !== null) {
+    const em = cleanEmailToken(`${jsmMatch[1]}@${jsmMatch[2]}`);
+    if (isValidEmail(em)) found.add(em);
+  }
+
+  // 4. Remove honeypot / hidden DOM elements
+  let deobfuscated = rawStr
+    .replace(/<(?:span|div|p|i|b|font)\b[^>]*\bstyle\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0|opacity\s*:\s*0)[^"']*["'][^>]*>[\s\S]*?<\/(?:span|div|p|i|b|font)>/gi, "")
+    .replace(/<(?:span|div|p|i|b|font)\b[^>]*\bclass\s*=\s*["'][^"']*(?:hidden|d-none|invisible|sr-only|honeypot)[^"']*["'][^>]*>[\s\S]*?<\/(?:span|div|p|i|b|font)>/gi, "")
+    .replace(/<!--[\s\S]*?-->/g, "");
+
+  // 5. Decode Entities, Escapes, Soft Hyphens & Zero-Width characters
+  deobfuscated = deobfuscated
+    .replace(/[\u00AD\u200B-\u200D\uFEFF\u2060]/g, "")
+    .replace(/&amp;#/gi, "&#")
+    .replace(/&amp;quot;/gi, '"')
+    .replace(/&amp;amp;/gi, "&")
+    .replace(/&#0*(\d+);?/g, (_, dec) => {
+      const code = parseInt(dec, 10);
+      return (code > 0 && code < 65536) ? String.fromCharCode(code) : "";
+    })
+    .replace(/&#x0*([0-9a-fA-F]+);?/g, (_, hex) => {
+      const code = parseInt(hex, 16);
+      return (code > 0 && code < 65536) ? String.fromCharCode(code) : "";
+    })
     .replace(/%40/gi, "@")
     .replace(/%2e/gi, ".")
-    // Decode JSON / Unicode escapes
-    .replace(/\\u0040/gi, "@")
-    .replace(/\\u002e/gi, ".")
-    // HTML named entities
+    // General Unicode escapes (\u0069 -> i)
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => {
+      const code = parseInt(hex, 16);
+      return (code > 0 && code < 65536) ? String.fromCharCode(code) : "";
+    })
+    .replace(/\\u002f/gi, "/")
+    .replace(/\\"/g, '"')
+    .replace(/\\\//g, "/")
     .replace(/&commat;/gi, "@")
     .replace(/&period;/gi, ".")
-    .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, " ")
+    .replace(/&minus;/gi, "-")
+    .replace(/[\uFF20\u00A9\u00AE]/g, "@")
+    .replace(/[\uFF0E\u00B7\u2022]/g, ".")
+    .replace(/[\u00A0\u2028\u2029]/g, " ")
     .replace(/mailto:\s*/gi, "");
 
-  // Common obfuscation replacements: [at], (at), [dot], (dot), etc.
-  const cleaned = text
-    .replace(/[@\uFF20\u00A9\u00AE]/g, "@")
-    .replace(/\s*[\(\[\{<]\s*(?:at|@)\s*[\)\]\}>]\s*/gi, "@")
-    .replace(/\s*([.\uFF0E\u00B7\u2022])\s*/g, ".")
-    .replace(/\s*[\(\[\{]\s*dot\s*[\)\]\}]\s*/gi, ".");
+  // 6. Obfuscated AT and DOT patterns:
+  // ONLY convert explicit bracketed/symbolic forms ([at], (at), {at}, <at>, _at_, -at-, *at*, [@], (@))
+  deobfuscated = deobfuscated
+    .replace(/\s*[\(\[\{<]\s*(?:at|@|a\s+t)\s*[\)\]\}>]\s*/gi, "@")
+    .replace(/\s*[-_/*]\s*(?:at|@)\s*[-_/*]\s*/gi, "@")
+    .replace(/\s+[@\uFF20]\s+/g, "@");
 
-  // Also catch spaced emails like "daisyyang @ zungsung . com"
-  const unspaced = cleaned.replace(/([a-zA-Z0-9._%+-]+)\s*@\s*([a-zA-Z0-9.-]+)\s*\.\s*([a-zA-Z]{2,24})/g, "$1@$2.$3");
+  deobfuscated = deobfuscated
+    .replace(/\s*[\(\[\{<]\s*(?:dot|\.|d\s+o\s+t)\s*[\)\]\}>]\s*/gi, ".")
+    .replace(/\s*[-_/*]\s*(?:dot|\.)\s*[-_/*]\s*/gi, ".");
 
-  const tokens = unspaced
-    .replace(/<[^>]+>/g, " ")
-    .split(/[\r\n,;| \t"'<>()[\]{}]+/)
-    .filter(Boolean);
+  // Safely replace "user at domain dot com" or "user AT domain DOT com"
+  // ONLY when BOTH "at" and "dot" are present in the exact email token pattern!
+  // (Prevents normal English sentences like "...businesses at risk. Word..." from becoming emails!)
+  deobfuscated = deobfuscated.replace(
+    /\b([a-zA-Z0-9._%+-]+)\s+(?:at|AT)\s+([a-zA-Z0-9-]+)\s+(?:dot|DOT)\s+([a-zA-Z]{2,24})\b/g,
+    "$1@$2.$3"
+  );
 
-  for (const token of tokens) {
-    const trimmed = token.trim().toLowerCase().replace(/^[^\w]+/, "").replace(/[^\w]+$/, "");
-    if (isValidEmail(trimmed)) {
-      found.add(trimmed);
-    } else {
-      const matches = trimmed.match(EMAIL_REGEX) || [];
-      for (let m of matches) {
-        m = m.toLowerCase().replace(/^[^\w]+/, "").replace(/[^\w]+$/, "");
-        if (isValidEmail(m)) {
-          found.add(m);
-        }
+  // 7. Strip tags both cleanly and with spaces
+  const strippedClean = deobfuscated
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, "");
+
+  const spacedClean = deobfuscated
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ");
+
+  // 8. Fix spaced emails (e.g. "daisyyang @ zungsung . com", "first . last @ sub . domain . co . uk")
+  function fixSpacedEmails(str) {
+    return str.replace(
+      /\b([a-zA-Z0-9._%+-]+(?:\s*\.\s*[a-zA-Z0-9._%+-]+)*)\s*@\s*([a-zA-Z0-9-]+(?:\s*\.\s*[a-zA-Z0-9-]+)*\s*\.\s*[a-zA-Z]{2,24})\b/g,
+      (_, localPart, domainPart) => {
+        const cl = localPart.replace(/\s+/g, "");
+        const cd = domainPart.replace(/\s+/g, "");
+        return `${cl}@${cd}`;
       }
+    );
+  }
+
+  const normalizedTexts = [
+    fixSpacedEmails(strippedClean),
+    fixSpacedEmails(spacedClean),
+    fixSpacedEmails(deobfuscated)
+  ];
+
+  const EXTRACT_REGEX = /[a-zA-Z0-9][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24}/g;
+
+  for (const textVer of normalizedTexts) {
+    const matches = textVer.match(EXTRACT_REGEX) || [];
+    for (const m of matches) {
+      const cleanM = cleanEmailToken(m);
+      if (isValidEmail(cleanM)) found.add(cleanM);
+    }
+
+    const tokens = textVer.split(/[\r\n,;| \t"'<>()[\]{}]+/);
+    for (const token of tokens) {
+      if (!token || !token.includes("@")) continue;
+      const cleanT = cleanEmailToken(token);
+      if (isValidEmail(cleanT)) found.add(cleanT);
+    }
+  }
+
+  // 9. Check Reversed Emails (RTL / CSS bidi override: moc.elpmaxe@ofni -> info@example.com)
+  const REVERSED_EMAIL_REGEX = /[a-zA-Z]{2,24}\.[a-zA-Z0-9.-]+@[a-zA-Z0-9._%+-]+[a-zA-Z0-9]/g;
+  for (const textVer of normalizedTexts) {
+    const revMatches = textVer.match(REVERSED_EMAIL_REGEX) || [];
+    for (const rm of revMatches) {
+      const reversed = rm.split("").reverse().join("");
+      const cleanRev = cleanEmailToken(reversed);
+      if (isValidEmail(cleanRev)) found.add(cleanRev);
     }
   }
 
@@ -1080,6 +1255,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       ocrImages: msg.ocrImages !== false,
       includeSubdomains: !!msg.includeSubdomains,
       skipProductDetailPages: msg.skipProductDetailPages !== false,
+      initialFindings: msg.initialFindings || [],
+      initialLinks: msg.initialLinks || [],
       isCrawling: true
     };
     activeCrawl = crawlState;
@@ -1361,7 +1538,7 @@ async function discoverCompanySisterDomainEmails(startUrl, companyKeywords, norm
 // ═══════════════════════════════════════════════════════════════════════
 
 async function runProductionCrawl(crawlState) {
-  const { startUrl, maxPages, concurrency, checkPdfs, ocrPdfs, ocrImages, includeSubdomains, skipProductDetailPages } = crawlState;
+  const { startUrl, maxPages, concurrency, checkPdfs, ocrPdfs, ocrImages, includeSubdomains, skipProductDetailPages, initialFindings, initialLinks } = crawlState;
   const startObj = new URL(startUrl);
   const baseOrigin = startObj.origin;
   const baseHostname = startObj.hostname;
@@ -1377,6 +1554,70 @@ async function runProductionCrawl(crawlState) {
   const visitedUrls = new Set();
   const visitedPdfs = new Set();
   const visitedImages = new Set();
+
+  // Deep URL Navigation Seeding:
+  // When starting on deep subpages (e.g., e-catalogs, flipbooks, deep product views like /en/e-catalog-253/All-Electric-Precise-Plunger-Machine.html),
+  // seed origin root (/), language section (/en/), and corporate contact/about pages
+  // so the crawler discovers the entire company domain and all email endpoints.
+  try {
+    const rawPath = startObj.pathname;
+    if (rawPath && rawPath !== "/" && rawPath !== "") {
+      const rootUrl = cleanAndNormalizeUrl(baseOrigin + "/", startUrl);
+      if (rootUrl && !enqueuedHtmlUrls.has(rootUrl)) {
+        enqueuedHtmlUrls.add(rootUrl);
+        htmlQueue.push(rootUrl);
+      }
+
+      // Check for language path prefix like /en/, /zh/, /tw/, /cn/, /es/, /de/, /fr/, /jp/
+      const langMatch = rawPath.match(/^\/([a-zA-Z]{2}(?:-[a-zA-Z]{2})?)(?:\/|$)/);
+      const langPrefix = langMatch ? `/${langMatch[1]}/` : "/";
+      if (langPrefix !== "/") {
+        const langUrl = cleanAndNormalizeUrl(baseOrigin + langPrefix, startUrl);
+        if (langUrl && !enqueuedHtmlUrls.has(langUrl)) {
+          enqueuedHtmlUrls.add(langUrl);
+          htmlQueue.push(langUrl);
+        }
+      }
+
+      const standardContactPaths = [
+        "contact.html", "contact-us.html", "contact_us.html", "contactus.html",
+        "contacts.html", "about.html", "about-us.html", "about_us.html", "aboutus.html",
+        "contact", "contact-us", "about", "about-us"
+      ];
+
+      for (const p of standardContactPaths) {
+        if (langPrefix !== "/") {
+          const lUrl = cleanAndNormalizeUrl(`${baseOrigin}${langPrefix}${p}`, startUrl);
+          if (lUrl && !enqueuedHtmlUrls.has(lUrl)) {
+            enqueuedHtmlUrls.add(lUrl);
+            htmlQueue.push(lUrl);
+          }
+        }
+        const rUrl = cleanAndNormalizeUrl(`${baseOrigin}/${p}`, startUrl);
+        if (rUrl && !enqueuedHtmlUrls.has(rUrl)) {
+          enqueuedHtmlUrls.add(rUrl);
+          htmlQueue.push(rUrl);
+        }
+      }
+    }
+  } catch (seedErr) {
+    console.debug("Deep seed notice:", seedErr);
+  }
+
+  // Ingest initial links from active tab DOM harvest if available
+  if (Array.isArray(initialLinks)) {
+    for (const rawL of initialLinks) {
+      const cUrl = cleanAndNormalizeUrl(rawL, startUrl);
+      if (cUrl && isUrlInScope(cUrl, baseOrigin, baseHostname, includeSubdomains) && !enqueuedHtmlUrls.has(cUrl)) {
+        enqueuedHtmlUrls.add(cUrl);
+        if (HIGH_PRIORITY_REGEX.test(cUrl)) {
+          htmlQueue.unshift(cUrl);
+        } else {
+          htmlQueue.push(cUrl);
+        }
+      }
+    }
+  }
 
   const discoveredPdfs = [];
   const discoveredImages = [];
@@ -1395,6 +1636,34 @@ async function runProductionCrawl(crawlState) {
   crawlState.visitedPdfs = visitedPdfs;
   crawlState.visitedImages = visitedImages;
   crawlState.pdfsAvailableCount = 0;
+
+  // Ingest initial findings from active tab DOM harvest
+  if (Array.isArray(initialFindings)) {
+    for (const f of initialFindings) {
+      if (f && f.email) {
+        const cleanEmails = normalizeAndExtractEmails(f.email);
+        for (const em of cleanEmails) {
+          const item = {
+            email: em,
+            sourceType: f.sourceType || "HTML (Live Tab)",
+            sourceUrl: f.sourceUrl || startUrl,
+            mainPageUrl: f.mainPageUrl || startUrl,
+            occurrences: 1,
+            sources: [
+              {
+                sourceType: f.sourceType || "HTML (Live Tab)",
+                sourceUrl: f.sourceUrl || startUrl,
+                mainPageUrl: f.mainPageUrl || startUrl,
+                timestamp: new Date().toISOString()
+              }
+            ]
+          };
+          findingsMap.set(em, item);
+          findings.push(item);
+        }
+      }
+    }
+  }
 
   // ── Multi-Source Email Recorder ──────────────────────────────────────
   function recordEmail(rawEmail, sourceUrl, sourceType, mainPageUrl) {
@@ -1669,7 +1938,11 @@ async function runProductionCrawl(crawlState) {
       try {
         if (SKIP_EXT_REGEX.test(currentUrl)) return;
 
-        const res = await fetch(currentUrl, { credentials: "omit", headers: STANDARD_FETCH_HEADERS });
+        const res = await fetch(currentUrl, {
+          credentials: "include",
+          headers: STANDARD_FETCH_HEADERS,
+          signal: AbortSignal.timeout(6000)
+        });
         if (!res.ok) return;
 
         // Issue 7 Fix: Capture final redirected URL to accurately resolve child links
@@ -1766,8 +2039,21 @@ async function runProductionCrawl(crawlState) {
         if (!rawLink) continue;
 
         if (rawLink.toLowerCase().startsWith("mailto:")) {
-          const addr = rawLink.slice(7).split("?")[0].trim();
-          if (addr) recordEmail(addr, finalUrl, "HTML (mailto)", finalUrl);
+          try {
+            const rawMailto = decodeURIComponent(rawLink);
+            const emailsInMailto = normalizeAndExtractEmails(rawMailto);
+            if (emailsInMailto.length > 0) {
+              for (const em of emailsInMailto) {
+                recordEmail(em, finalUrl, "HTML (mailto)", finalUrl);
+              }
+            } else {
+              const addr = rawLink.slice(7).split("?")[0].trim();
+              if (addr) recordEmail(addr, finalUrl, "HTML (mailto)", finalUrl);
+            }
+          } catch {
+            const addr = rawLink.slice(7).split("?")[0].trim();
+            if (addr) recordEmail(addr, finalUrl, "HTML (mailto)", finalUrl);
+          }
           continue;
         }
 

@@ -249,10 +249,10 @@ async function getOcrWorker() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 2. STRICT EMAIL VALIDATION & EXTRACTION
+// 2. STRICT EMAIL VALIDATION & SAFE ANTI-OBFUSCATION PARSER
 // ═══════════════════════════════════════════════════════════════════════
 
-// Recognized valid TLDs (top generic + modern + all ISO country codes)
+// Comprehensive, recognized valid ICANN TLDs
 const VALID_TLDS = new Set([
   // Common generic and modern gTLDs
   "com", "org", "net", "edu", "gov", "mil", "int", "info", "biz", "name", "pro",
@@ -263,6 +263,8 @@ const VALID_TLDS = new Set([
   "top", "vip", "xyz", "icu", "click", "fit", "fun", "press", "website", "pub",
   "casa", "ltd", "chat", "law", "bio", "me", "tv", "cc", "eu", "la", "mobi",
   "asia", "cat", "jobs", "tel", "travel", "design", "email", "cloud",
+  "trade", "boutique", "direct", "parts", "engineering", "machine", "machinery",
+  "holdings", "enterprises", "consulting", "marketing", "international", "solar",
   // Standard two-letter ISO country code ccTLDs
   "ac", "ad", "ae", "af", "ag", "al", "am", "ao", "aq", "ar", "as", "at", "au",
   "aw", "ax", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bm",
@@ -284,18 +286,53 @@ const VALID_TLDS = new Set([
   "vg", "vi", "vn", "vu", "ws", "ye", "za", "zm", "zw"
 ]);
 
+const BAD_ASSET_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "webp", "gif", "svg", "bmp", "ico", "tiff", "tif",
+  "css", "js", "mjs", "cjs", "jsx", "ts", "tsx", "json", "xml", "wasm", "map",
+  "vue", "php", "py", "cpp", "java", "rb", "go", "rs", "c", "h", "html", "htm",
+  "pdf", "zip", "tar", "gz", "rar", "7z", "bz2", "mp4", "mp3", "wav", "webm",
+  "avi", "ogg", "ogv", "flac", "aac", "woff", "woff2", "ttf", "eot", "otf",
+  "bin", "dat", "exe", "dmg", "apk", "iso", "bak", "tmp", "log", "txt", "csv", "md"
+]);
+
+const DUMMY_EMAILS = new Set([
+  "test@test.com", "example@example.com", "user@domain.com", "name@company.com",
+  "someone@example.com", "sample@sample.com", "admin@domain.com", "email@email.com",
+  "user@example.com", "email@example.com", "name@example.com", "yourname@email.com",
+  "username@domain.com", "first.last@domain.com"
+]);
+
+function safeAtob(b64) {
+  try {
+    if (typeof atob === "function") return atob(b64);
+    if (typeof Buffer !== "undefined") return Buffer.from(b64, "base64").toString("utf-8");
+  } catch {}
+  return "";
+}
+
+function cleanEmailToken(str) {
+  if (!str) return "";
+  return String(str)
+    .trim()
+    .toLowerCase()
+    .replace(/^mailto:\s*/i, "")
+    .replace(/^[^a-z0-9]+/, "")
+    .replace(/[^a-z0-9]+$/, "");
+}
+
 function isValidEmail(email) {
-  if (!email || email.length < 6 || email.length > 254) return false;
-  const atParts = email.split("@");
+  if (!email || typeof email !== "string") return false;
+  const clean = email.trim().toLowerCase();
+  if (clean.length < 5 || clean.length > 254) return false;
+
+  const atParts = clean.split("@");
   if (atParts.length !== 2) return false;
   const [local, domain] = atParts;
-  if (!local || local.length < 2 || local.length > 64 || !domain) return false;
+  if (!local || local.length < 1 || local.length > 64 || !domain) return false;
 
-  // Local part checks: must start and end with alphanumeric, no consecutive dots/symbols
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._%+-]*[a-zA-Z0-9]$/.test(local)) return false;
-  if (local.includes("..") || local.includes("__") || local.includes("--")) return false;
-  // Disallow pure numeric local parts unless >= 4 digits
-  if (/^\d+$/.test(local) && local.length < 4) return false;
+  // Local part checks: alphanumeric at start/end, valid characters, no consecutive dots
+  if (!/^[a-z0-9](?:[a-z0-9._%+-]*[a-z0-9])?$/.test(local)) return false;
+  if (local.includes("..")) return false;
 
   // Domain checks
   if (!domain.includes(".") || domain.startsWith(".") || domain.endsWith(".")) return false;
@@ -305,33 +342,25 @@ function isValidEmail(email) {
   for (const label of domainLabels) {
     if (!label || label.length > 63) return false;
     if (label.startsWith("-") || label.endsWith("-")) return false;
-    if (!/^[a-zA-Z0-9-]+$/.test(label)) return false;
+    if (!/^[a-z0-9-]+$/.test(label)) return false;
   }
 
   // Second-Level Domain (SLD) check: label immediately preceding TLD
-  const sld = domainLabels[domainLabels.length - 2].toLowerCase();
-  // Reject single-character SLDs (e.g. "0.yl", "j.xbr") unless single-letter on .com
-  if (sld.length < 2) {
-    const tldCandidate = domainLabels[domainLabels.length - 1].toLowerCase();
-    if (tldCandidate !== "com" || !/^[a-zA-Z]$/.test(sld)) return false;
-  }
-  // Reject SLDs that are pure digits (e.g. "0.com", "123.net")
-  if (/^\d+$/.test(sld)) return false;
+  const sld = domainLabels[domainLabels.length - 2];
+  if (sld.length < 1) return false;
 
-  // TLD check: must be recognized valid TLD
-  const tld = domainLabels[domainLabels.length - 1].toLowerCase();
-  if (!VALID_TLDS.has(tld)) return false;
+  // Strict TLD check: must be a recognized ICANN TLD or punycode (rejects fake TLDs like .word)
+  const tld = domainLabels[domainLabels.length - 1];
+  const isPunycode = tld.startsWith("xn--") && tld.length >= 5;
+  const isKnownTld = VALID_TLDS.has(tld);
+
+  if (!isKnownTld && !isPunycode) return false;
 
   // Asset extension reject
-  const badExtensions = /\.(png|jpe?g|webp|gif|svg|bmp|ico|tiff?|css|js|jsx|ts|tsx|woff2?|ttf|eot|pdf|zip|gz|tar|rar|mp4|webm|avi|mp3|wav|xml|json|wasm|bin|dat)$/i;
-  if (badExtensions.test(email)) return false;
+  if (BAD_ASSET_EXTENSIONS.has(tld)) return false;
 
   // Dummy placeholder emails reject
-  const dummyEmails = new Set([
-    "test@test.com", "example@example.com", "user@domain.com", "name@company.com",
-    "someone@example.com", "sample@sample.com", "admin@domain.com", "email@email.com"
-  ]);
-  if (dummyEmails.has(email.toLowerCase())) return false;
+  if (DUMMY_EMAILS.has(clean)) return false;
 
   return true;
 }
@@ -360,75 +389,156 @@ function normalizeAndExtractEmails(rawText) {
   const rawStr = String(rawText);
 
   // 1. Cloudflare Email Protection Deobfuscation
-  // Detects data-cfemail="..." and /cdn-cgi/l/email-protection#...
-  const cfEmailRegex = /(?:data-cfemail=["']([0-9a-fA-F]+)["']|\/cdn-cgi\/l\/email-protection(?:#|\?)([0-9a-fA-F]+))/gi;
+  const cfEmailRegex = /(?:data-cfemail\s*=\s*["']?([0-9a-fA-F]{4,})["']?|\/cdn-cgi\/l\/email-protection(?:#|\?|%23)([0-9a-fA-F]{4,}))/gi;
   let cfMatch;
   while ((cfMatch = cfEmailRegex.exec(rawStr)) !== null) {
     const hex = cfMatch[1] || cfMatch[2];
     const decoded = decodeCloudflareEmail(hex);
     if (decoded) {
-      const cleanDecoded = decoded.trim().toLowerCase().replace(/^[^\w]+/, "").replace(/[^\w]+$/, "");
-      if (isValidEmail(cleanDecoded)) {
-        found.add(cleanDecoded);
-      }
+      const clean = cleanEmailToken(decoded);
+      if (isValidEmail(clean)) found.add(clean);
     }
   }
 
-  // 2. Base64 Encoded Email Data Attributes (e.g. data-email="...", data-mail="...", data-contact="...")
-  const b64AttrRegex = /\bdata-(?:email|mail|contact|encoded)\s*=\s*["']([a-zA-Z0-9+/=]{8,120})["']/gi;
+  // 2. Base64 Encoded Email Data Attributes
+  const b64AttrRegex = /\bdata-(?:email|mail|contact|encoded|cfemail)\s*=\s*["']([a-zA-Z0-9+/=]{8,120})["']/gi;
   let b64Match;
   while ((b64Match = b64AttrRegex.exec(rawStr)) !== null) {
+    const decoded = safeAtob(b64Match[1]);
+    if (decoded) {
+      const clean = cleanEmailToken(decoded);
+      if (isValidEmail(clean)) found.add(clean);
+    }
+  }
+
+  // 3. Hex / URL Encoded Mailto links
+  const mailtoRegex = /mailto:\s*([^\s"'<>]+)/gi;
+  let mMatch;
+  while ((mMatch = mailtoRegex.exec(rawStr)) !== null) {
     try {
-      const decoded = atob(b64Match[1]).trim().toLowerCase().replace(/^[^\w]+/, "").replace(/[^\w]+$/, "");
-      if (isValidEmail(decoded)) {
-        found.add(decoded);
+      const decodedMailto = decodeURIComponent(mMatch[1].split("?")[0]);
+      const addrs = decodedMailto.split(/[,;]+/);
+      for (const a of addrs) {
+        const clean = cleanEmailToken(a);
+        if (isValidEmail(clean)) found.add(clean);
       }
     } catch {}
   }
 
-  // 3. Decode all HTML Decimal Entities (&#105;) and Hex Entities (&#x69;)
-  let text = rawStr
-    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    // Decode URI component escapes like %40, %2e
+  // 4. Decode HTML Entities (Numeric &#105;, Hex &#x69;)
+  let deobfuscated = rawStr
+    .replace(/&#(\d+);/g, (_, dec) => {
+      try {
+        return String.fromCharCode(parseInt(dec, 10));
+      } catch {
+        return "";
+      }
+    })
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
+      try {
+        return String.fromCharCode(parseInt(hex, 16));
+      } catch {
+        return "";
+      }
+    });
+
+  // 5. Decode URL escapes, Unicode escapes, and special AT/DOT symbols
+  deobfuscated = deobfuscated
     .replace(/%40/gi, "@")
     .replace(/%2e/gi, ".")
-    // Decode JSON / Unicode escapes
     .replace(/\\u0040/gi, "@")
     .replace(/\\u002e/gi, ".")
-    // HTML named entities
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => {
+      try {
+        return String.fromCharCode(parseInt(hex, 16));
+      } catch {
+        return "";
+      }
+    })
+    .replace(/\\u002f/gi, "/")
+    .replace(/\\"/g, '"')
+    .replace(/\\\//g, "/")
     .replace(/&commat;/gi, "@")
     .replace(/&period;/gi, ".")
-    .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, " ")
+    .replace(/&minus;/gi, "-")
+    .replace(/[\uFF20\u00A9\u00AE]/g, "@")
+    .replace(/[\uFF0E\u00B7\u2022]/g, ".")
+    .replace(/[\u00A0\u2028\u2029]/g, " ")
     .replace(/mailto:\s*/gi, "");
 
-  // Common obfuscation replacements: [at], (at), [dot], (dot), etc.
-  const cleaned = text
-    .replace(/[@\uFF20\u00A9\u00AE]/g, "@")
-    .replace(/\s*[\(\[\{<]\s*(?:at|@)\s*[\)\]\}>]\s*/gi, "@")
-    .replace(/\s*([.\uFF0E\u00B7\u2022])\s*/g, ".")
-    .replace(/\s*[\(\[\{]\s*dot\s*[\)\]\}]\s*/gi, ".");
+  // 6. Obfuscated AT and DOT patterns:
+  // ONLY convert explicit bracketed/symbolic forms ([at], (at), {at}, <at>, _at_, -at-, *at*, [@], (@))
+  deobfuscated = deobfuscated
+    .replace(/\s*[\(\[\{<]\s*(?:at|@|a\s+t)\s*[\)\]\}>]\s*/gi, "@")
+    .replace(/\s*[-_/*]\s*(?:at|@)\s*[-_/*]\s*/gi, "@")
+    .replace(/\s+[@\uFF20]\s+/g, "@");
 
-  // Also catch spaced emails like "daisyyang @ zungsung . com"
-  const unspaced = cleaned.replace(/([a-zA-Z0-9._%+-]+)\s*@\s*([a-zA-Z0-9.-]+)\s*\.\s*([a-zA-Z]{2,24})/g, "$1@$2.$3");
+  deobfuscated = deobfuscated
+    .replace(/\s*[\(\[\{<]\s*(?:dot|\.|d\s+o\s+t)\s*[\)\]\}>]\s*/gi, ".")
+    .replace(/\s*[-_/*]\s*(?:dot|\.)\s*[-_/*]\s*/gi, ".");
 
-  const tokens = unspaced
-    .replace(/<[^>]+>/g, " ")
-    .split(/[\r\n,;| \t"'<>()[\]{}]+/)
-    .filter(Boolean);
+  // Safely replace "user at domain dot com" or "user AT domain DOT com"
+  // ONLY when BOTH "at" and "dot" are present in the exact email token pattern!
+  // (Prevents normal English sentences like "...businesses at risk. Word..." from becoming emails!)
+  deobfuscated = deobfuscated.replace(
+    /\b([a-zA-Z0-9._%+-]+)\s+(?:at|AT)\s+([a-zA-Z0-9-]+)\s+(?:dot|DOT)\s+([a-zA-Z]{2,24})\b/g,
+    "$1@$2.$3"
+  );
 
-  for (const token of tokens) {
-    const trimmed = token.trim().toLowerCase().replace(/^[^\w]+/, "").replace(/[^\w]+$/, "");
-    if (isValidEmail(trimmed)) {
-      found.add(trimmed);
-    } else {
-      const matches = trimmed.match(EMAIL_REGEX) || [];
-      for (let m of matches) {
-        m = m.toLowerCase().replace(/^[^\w]+/, "").replace(/[^\w]+$/, "");
-        if (isValidEmail(m)) {
-          found.add(m);
-        }
+  // 7. Strip tags both cleanly and with spaces
+  const strippedClean = deobfuscated
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, "");
+
+  const spacedClean = deobfuscated
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ");
+
+  // 8. Fix spaced emails (e.g. "daisyyang @ zungsung . com", "first . last @ sub . domain . co . uk")
+  function fixSpacedEmails(str) {
+    return str.replace(
+      /\b([a-zA-Z0-9._%+-]+(?:\s*\.\s*[a-zA-Z0-9._%+-]+)*)\s*@\s*([a-zA-Z0-9-]+(?:\s*\.\s*[a-zA-Z0-9-]+)*\s*\.\s*[a-zA-Z]{2,24})\b/g,
+      (_, localPart, domainPart) => {
+        const cl = localPart.replace(/\s+/g, "");
+        const cd = domainPart.replace(/\s+/g, "");
+        return `${cl}@${cd}`;
       }
+    );
+  }
+
+  const normalizedTexts = [
+    fixSpacedEmails(strippedClean),
+    fixSpacedEmails(spacedClean),
+    fixSpacedEmails(deobfuscated)
+  ];
+
+  const EXTRACT_REGEX = /[a-zA-Z0-9][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24}/g;
+
+  for (const textVer of normalizedTexts) {
+    const matches = textVer.match(EXTRACT_REGEX) || [];
+    for (const m of matches) {
+      const cleanM = cleanEmailToken(m);
+      if (isValidEmail(cleanM)) found.add(cleanM);
+    }
+
+    const tokens = textVer.split(/[\r\n,;| \t"'<>()[\]{}]+/);
+    for (const token of tokens) {
+      if (!token || !token.includes("@")) continue;
+      const cleanT = cleanEmailToken(token);
+      if (isValidEmail(cleanT)) found.add(cleanT);
+    }
+  }
+
+  // 9. Check Reversed Emails (RTL / CSS bidi override: moc.elpmaxe@ofni -> info@example.com)
+  const REVERSED_EMAIL_REGEX = /[a-zA-Z]{2,24}\.[a-zA-Z0-9.-]+@[a-zA-Z0-9._%+-]+[a-zA-Z0-9]/g;
+  for (const textVer of normalizedTexts) {
+    const revMatches = textVer.match(REVERSED_EMAIL_REGEX) || [];
+    for (const rm of revMatches) {
+      const reversed = rm.split("").reverse().join("");
+      const cleanRev = cleanEmailToken(reversed);
+      if (isValidEmail(cleanRev)) found.add(cleanRev);
     }
   }
 
@@ -908,12 +1018,38 @@ async function handleProcessPdf({ pdfUrl, mainPageUrl, base64Data, ocrPdfs }) {
       const textContent = await page.getTextContent();
       const items = textContent.items || [];
       const pageText = items.map((it) => it.str).join(" ");
-      const compactText = items.map((it) => it.str).join("");
+
+      // Reconstruct text with spacing and line breaks based on coordinate transforms
+      // (CRITICAL FIX: Prevents merging sentences across PDF layout items, eliminating false positives like businesses@risk.word)
+      let reconstructedText = "";
+      let lastY = null;
+      let lastX = null;
+      let lastWidth = 0;
+
+      for (const it of items) {
+        const str = it.str;
+        if (!str) continue;
+        const x = it.transform ? it.transform[4] : null;
+        const y = it.transform ? it.transform[5] : null;
+
+        if (lastY !== null && y !== null && Math.abs(y - lastY) > 5) {
+          reconstructedText += "\n";
+          lastX = null;
+        } else if (lastX !== null && x !== null && x > lastX + lastWidth + 2) {
+          reconstructedText += " ";
+        } else if (reconstructedText.length > 0 && !reconstructedText.endsWith(" ") && !reconstructedText.endsWith("\n")) {
+          reconstructedText += " ";
+        }
+        reconstructedText += str;
+        lastY = y;
+        lastX = x;
+        lastWidth = it.width || 0;
+      }
 
       const textEmails = [
         ...new Set([
           ...normalizeAndExtractEmails(pageText),
-          ...normalizeAndExtractEmails(compactText)
+          ...normalizeAndExtractEmails(reconstructedText)
         ])
       ];
 
@@ -930,14 +1066,16 @@ async function handleProcessPdf({ pdfUrl, mainPageUrl, base64Data, ocrPdfs }) {
       }
 
       // Digital text check: if the page already contains digital text characters,
-      // it was already fully extracted and checked by normalizeAndExtractEmails(pageText).
+      // it was already fully extracted and checked by normalizeAndExtractEmails.
       // OCR is ONLY needed for purely scanned / raster image pages (no extractable digital text).
       const isScannedRasterPage = pageText.trim().length < 30 && items.length < 5;
-      const isCandidateForOcr = shouldOcr && isScannedRasterPage;
+      // Performance optimization: scanned catalogs/brochures put contacts in front or back covers (first 3 / last 2 pages)
+      const isPriorityPage = pageNum <= 3 || pageNum > numPages - 2;
+      const isCandidateForOcr = shouldOcr && isScannedRasterPage && isPriorityPage;
 
       if (isCandidateForOcr) {
         ocrStatus.textContent = `🔍 OCR: Scanning page ${pageNum}/${numPages} canvas for ${fileName}...`;
-        const viewport = page.getViewport({ scale: 1.25 });
+        const viewport = page.getViewport({ scale: 1.0 });
         const canvas = document.createElement("canvas");
         canvas.width = Math.floor(viewport.width);
         canvas.height = Math.floor(viewport.height);
@@ -1058,7 +1196,7 @@ async function handleProcessImageOcr({ imageUrl, mainPageUrl, dataUrl, imageCont
 
       if (img.naturalWidth > 0 && img.naturalHeight > 0) {
         // Skip tiny icons, bullets, and buttons that cannot fit an email
-        if (img.naturalWidth < 150 || img.naturalHeight < 50 || Math.min(img.naturalWidth, img.naturalHeight) < 25) {
+        if (img.naturalWidth < 120 || img.naturalHeight < 40 || Math.min(img.naturalWidth, img.naturalHeight) < 20) {
           updateImageRecordStatus(imageUrl, "Skipped (too small)", 0);
           chrome.runtime.sendMessage({
             type: "UPDATE_IMAGE_STATUS",
@@ -1069,8 +1207,21 @@ async function handleProcessImageOcr({ imageUrl, mainPageUrl, dataUrl, imageCont
           return;
         }
 
-        // Scale down oversized images to max 800px for 10x faster OCR without losing legibility
-        const maxDim = 800;
+        // Skip extreme aspect ratio decorative strips or bars
+        const ratio = img.naturalWidth / img.naturalHeight;
+        if (ratio > 16 || ratio < 0.06) {
+          updateImageRecordStatus(imageUrl, "Skipped (banner strip)", 0);
+          chrome.runtime.sendMessage({
+            type: "UPDATE_IMAGE_STATUS",
+            url: imageUrl,
+            status: "Skipped (banner strip)",
+            emailsFound: 0
+          }).catch(() => {});
+          return;
+        }
+
+        // Scale down oversized images to max 650px for 50% faster OCR without losing legibility
+        const maxDim = 650;
         let w = img.naturalWidth;
         let h = img.naturalHeight;
         if (w > maxDim || h > maxDim) {
@@ -1272,10 +1423,11 @@ function stopHeartbeat() {
 // ═══════════════════════════════════════════════════════════════════════
 
 startBtn.addEventListener("click", async () => {
+  const activeTabObj = await detectActiveTab();
   let targetUrl = targetUrlInput ? targetUrlInput.value.trim() : "";
-  if (!targetUrl) {
-    targetUrl = await detectActiveTabUrl();
-    if (targetUrl && targetUrlInput) targetUrlInput.value = targetUrl;
+  if (!targetUrl && activeTabObj && activeTabObj.url) {
+    targetUrl = activeTabObj.url;
+    if (targetUrlInput) targetUrlInput.value = targetUrl;
   }
 
   if (!targetUrl || (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://"))) {
@@ -1320,6 +1472,33 @@ startBtn.addEventListener("click", async () => {
   startHeartbeat();
   statusText.textContent = "Connecting to website and discovering pages...";
 
+  let initialFindings = [];
+  let initialLinks = [];
+
+  // Harvest DOM from currently active tab if URLs match
+  if (
+    activeTabObj &&
+    activeTabObj.id &&
+    activeTabObj.url &&
+    targetUrl.split("#")[0].replace(/\/$/, "") === activeTabObj.url.split("#")[0].replace(/\/$/, "")
+  ) {
+    statusText.textContent = "Harvesting live page elements & scripts...";
+    const domHarvest = await harvestActiveTabDom(activeTabObj.id);
+    if (domHarvest.emails.length > 0) {
+      for (const em of domHarvest.emails) {
+        const item = {
+          email: em,
+          sourceType: "HTML (Live Tab)",
+          sourceUrl: targetUrl,
+          mainPageUrl: targetUrl
+        };
+        registerFoundEmail(item);
+        initialFindings.push(item);
+      }
+    }
+    initialLinks = domHarvest.links || [];
+  }
+
   chrome.runtime.sendMessage(
     {
       type: "START_CRAWL",
@@ -1330,7 +1509,9 @@ startBtn.addEventListener("click", async () => {
       ocrPdfs: ocrImagesCheckbox.checked,
       skipProductDetailPages: skipProductDetailsCheckbox.checked,
       checkPdfs: checkPdfsCheckbox.checked,
-      includeSubdomains: includeSubdomainsCheckbox.checked
+      includeSubdomains: includeSubdomainsCheckbox.checked,
+      initialFindings,
+      initialLinks
     },
     (response) => {
       isCrawling = false;
@@ -1600,44 +1781,86 @@ function escapeHtml(str) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 8. PERSISTENT WINDOW MODE & TAB URL DETECTION
+// 8. PERSISTENT WINDOW MODE, TAB URL DETECTION & DOM HARVESTING
 // ═══════════════════════════════════════════════════════════════════════
 
-async function detectActiveTabUrl() {
+async function detectActiveTab() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab && tab.url && tab.url.startsWith("http")) {
-      return tab.url;
-    }
-  } catch (e) {}
+    if (tab && tab.url && tab.url.startsWith("http")) return tab;
+  } catch {}
 
   try {
     const normalWindows = await chrome.windows.getAll({ windowTypes: ["normal"], populate: true });
     for (const win of normalWindows) {
       if (win.focused) {
         const activeTab = win.tabs && win.tabs.find((t) => t.active);
-        if (activeTab && activeTab.url && activeTab.url.startsWith("http")) {
-          return activeTab.url;
-        }
+        if (activeTab && activeTab.url && activeTab.url.startsWith("http")) return activeTab;
       }
     }
     for (const win of normalWindows) {
       const activeTab = win.tabs && win.tabs.find((t) => t.active);
-      if (activeTab && activeTab.url && activeTab.url.startsWith("http")) {
-        return activeTab.url;
-      }
+      if (activeTab && activeTab.url && activeTab.url.startsWith("http")) return activeTab;
     }
-  } catch (e) {}
+  } catch {}
 
   try {
     const allTabs = await chrome.tabs.query({});
     const httpTab = allTabs.find(
       (t) => t.url && t.url.startsWith("http") && !t.url.includes("chrome-extension://")
     );
-    if (httpTab) return httpTab.url;
-  } catch (e) {}
+    if (httpTab) return httpTab;
+  } catch {}
 
-  return "";
+  return null;
+}
+
+async function harvestActiveTabDom(tabId) {
+  if (!tabId || typeof chrome.scripting === "undefined" || !chrome.scripting.executeScript) {
+    return { emails: [], links: [] };
+  }
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const docText = document.body ? document.body.innerText || "" : "";
+        const docHtml = document.documentElement ? document.documentElement.outerHTML || "" : "";
+        const linkHrefs = [];
+        const links = document.querySelectorAll("a[href], [data-href], [data-url]");
+        links.forEach((el) => {
+          const href = el.getAttribute("href") || el.getAttribute("data-href") || el.getAttribute("data-url");
+          if (href) linkHrefs.push(href);
+        });
+        return {
+          text: docText.slice(0, 500000),
+          html: docHtml.slice(0, 1000000),
+          links: linkHrefs.slice(0, 500)
+        };
+      }
+    });
+
+    if (results && results[0] && results[0].result) {
+      const res = results[0].result;
+      const emails = [
+        ...new Set([
+          ...normalizeAndExtractEmails(res.text),
+          ...normalizeAndExtractEmails(res.html)
+        ])
+      ];
+      return {
+        emails,
+        links: res.links || []
+      };
+    }
+  } catch (err) {
+    console.debug("harvestActiveTabDom notice:", err);
+  }
+  return { emails: [], links: [] };
+}
+
+async function detectActiveTabUrl() {
+  const tab = await detectActiveTab();
+  return tab && tab.url ? tab.url : "";
 }
 
 async function openPersistentWindow() {
