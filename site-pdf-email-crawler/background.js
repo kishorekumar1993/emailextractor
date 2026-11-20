@@ -4,8 +4,6 @@
 // Strict Visual & OCR Warning-Only Detection | Business Classifier
 // ═══════════════════════════════════════════════════════════════════════
 
-const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24}/g;
-
 // Static non-document asset extensions to skip from HTML crawl queue
 const SKIP_EXT_REGEX = /\.(css|js|jsx|ts|tsx|woff|woff2|ttf|eot|otf|mp4|webm|ogv|avi|mp3|wav|flac|aac|ogg|zip|rar|7z|tar|gz|bz2|iso|dmg|exe|msi|apk|bin|rss|atom|xml|json)(\?.*)?$/i;
 
@@ -981,8 +979,7 @@ const DUMMY_EMAILS = new Set([
 
 function safeAtob(b64) {
   try {
-    if (typeof atob === "function") return atob(b64);
-    if (typeof Buffer !== "undefined") return Buffer.from(b64, "base64").toString("utf-8");
+    return atob(b64);
   } catch {}
   return "";
 }
@@ -1296,6 +1293,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "START_CRAWL") {
     if (activeCrawl) {
       activeCrawl.aborted = true;
+      activeCrawl.isCrawling = false;
+      if (activeCrawl.abortController) {
+        try { activeCrawl.abortController.abort(); } catch {}
+      }
       activeCrawl = null;
     }
 
@@ -1468,7 +1469,7 @@ let lastProgressEmitTime = 0;
 function emitProgress(data) {
   const now = Date.now();
   // Throttle updates to at most once per 100ms unless queue is empty (finished)
-  if (now - lastProgressEmitTime < 100 && data.queueRemaining !== 0) return;
+  if (now - lastProgressEmitTime < 100 && (data.queueRemaining ?? 0) !== 0) return;
   lastProgressEmitTime = now;
   chrome.runtime.sendMessage({ type: "CRAWL_PROGRESS", ...data }).catch(() => {});
 }
@@ -1596,13 +1597,18 @@ async function discoverCompanySisterDomainEmails(startUrl, companyKeywords, norm
 
 // ─── Fast Sitemap & Robots.txt Discovery ─────────────────────────────
 // Discovers official site pages upfront without relying solely on DOM links
+// Bounded to at most 12 fetches with safety timeouts to prevent start delays
 async function probeSitemaps(baseOrigin, abortSignal) {
   const discovered = [];
-  const sitemapEndpoints = [
+  const baseEndpoints = [
     `${baseOrigin}/sitemap.xml`,
     `${baseOrigin}/sitemap_index.xml`,
     `${baseOrigin}/robots.txt`
   ];
+  const queue = [...baseEndpoints];
+  const seenEndpoints = new Set(queue);
+  let fetched = 0;
+  const MAX_FETCHES = 12;
 
   function getSignal(ms) {
     if (abortSignal && typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
@@ -1611,8 +1617,11 @@ async function probeSitemaps(baseOrigin, abortSignal) {
     return abortSignal || AbortSignal.timeout(ms);
   }
 
-  for (const endpoint of sitemapEndpoints) {
+  while (queue.length > 0 && fetched < MAX_FETCHES) {
     if (abortSignal && abortSignal.aborted) break;
+    const endpoint = queue.shift();
+    fetched++;
+
     try {
       const res = await fetch(endpoint, {
         credentials: "omit",
@@ -1628,8 +1637,9 @@ async function probeSitemaps(baseOrigin, abortSignal) {
         if (smMatches) {
           for (const sm of smMatches) {
             const smUrl = sm.replace(/^\s*Sitemap:\s*/i, "").trim();
-            if (smUrl && !sitemapEndpoints.includes(smUrl)) {
-              sitemapEndpoints.push(smUrl);
+            if (smUrl && !seenEndpoints.has(smUrl) && queue.length < MAX_FETCHES) {
+              seenEndpoints.add(smUrl);
+              queue.push(smUrl);
             }
           }
         }
@@ -1643,21 +1653,11 @@ async function probeSitemaps(baseOrigin, abortSignal) {
           if (abortSignal && abortSignal.aborted) break;
           const locMatch = s.match(/<loc>([^<]+)<\/loc>/i);
           if (locMatch && locMatch[1]) {
-            try {
-              const subRes = await fetch(locMatch[1].trim(), {
-                credentials: "omit",
-                headers: { "Accept": "text/xml,application/xml,*/*" },
-                signal: getSignal(2000)
-              });
-              if (subRes.ok) {
-                const subText = await subRes.text();
-                const locs = subText.match(/<loc>([^<]+)<\/loc>/gi) || [];
-                for (const l of locs) {
-                  const u = l.replace(/<\/?loc>/gi, "").trim();
-                  if (u) discovered.push(u);
-                }
-              }
-            } catch {}
+            const subUrl = locMatch[1].trim();
+            if (!seenEndpoints.has(subUrl) && queue.length < MAX_FETCHES) {
+              seenEndpoints.add(subUrl);
+              queue.push(subUrl);
+            }
           }
         }
       } else {
@@ -1668,7 +1668,7 @@ async function probeSitemaps(baseOrigin, abortSignal) {
         }
       }
 
-      if (discovered.length > 0) break;
+      if (discovered.length >= 500) break;
     } catch {}
   }
   return discovered;
@@ -1681,8 +1681,8 @@ async function probeSitemaps(baseOrigin, abortSignal) {
 async function runProductionCrawl(crawlState) {
   const { startUrl, maxPages, concurrency, checkPdfs, ocrPdfs, ocrImages, includeSubdomains, skipProductDetailPages, initialFindings, initialLinks } = crawlState;
   const startObj = new URL(startUrl);
-  const baseOrigin = startObj.origin;
-  const baseHostname = startObj.hostname;
+  let baseOrigin = startObj.origin;
+  let baseHostname = startObj.hostname;
 
   const crawlAbortController = new AbortController();
   crawlState.abortController = crawlAbortController;
@@ -1725,48 +1725,52 @@ async function runProductionCrawl(crawlState) {
   crawlState.pdfsAvailableCount = 0;
 
   // ── Multi-Source Email Recorder ──────────────────────────────────────
-  function recordEmail(rawEmail, sourceUrl, sourceType, mainPageUrl) {
-    if (!rawEmail) return;
-    const cleanEmails = normalizeAndExtractEmails(rawEmail);
-    if (cleanEmails.length === 0) return;
+  // Direct clean email recorder: bypasses redundant normalizeAndExtractEmails passes
+  function recordCleanEmail(email, sourceUrl, sourceType, mainPageUrl) {
+    if (!email || !isValidEmail(email)) return;
+    const existing = findingsMap.get(email);
+    const nowStr = new Date().toISOString();
+    const sourceEntry = {
+      sourceType: sourceType || "HTML",
+      sourceUrl: sourceUrl || startUrl,
+      mainPageUrl: mainPageUrl || sourceUrl || startUrl,
+      timestamp: nowStr
+    };
 
-    for (const email of cleanEmails) {
-      const existing = findingsMap.get(email);
-      const nowStr = new Date().toISOString();
-      const sourceEntry = {
+    if (existing) {
+      const alreadyHasSource = existing.sources.some(
+        (s) => s.sourceUrl === sourceEntry.sourceUrl && s.sourceType === sourceEntry.sourceType
+      );
+      if (!alreadyHasSource) {
+        existing.sources.push(sourceEntry);
+        existing.occurrences = existing.sources.length;
+        emitEmailFound(existing);
+      }
+    } else {
+      const item = {
+        email,
         sourceType: sourceType || "HTML",
         sourceUrl: sourceUrl || startUrl,
         mainPageUrl: mainPageUrl || sourceUrl || startUrl,
-        timestamp: nowStr
+        occurrences: 1,
+        sources: [sourceEntry]
       };
+      findingsMap.set(email, item);
+      findings.push(item);
+      emitEmailFound(item);
+    }
+  }
 
-      if (existing) {
-        // Multi-source tracking: check if this source is already logged
-        const alreadyHasSource = existing.sources.some(
-          (s) => s.sourceUrl === sourceEntry.sourceUrl && s.sourceType === sourceEntry.sourceType
-        );
-        if (!alreadyHasSource) {
-          existing.sources.push(sourceEntry);
-          existing.occurrences = existing.sources.length;
-          emitEmailFound(existing);
-        }
-      } else {
-        const item = {
-          email,
-          sourceType: sourceType || "HTML",
-          sourceUrl: sourceUrl || startUrl,
-          mainPageUrl: mainPageUrl || sourceUrl || startUrl,
-          occurrences: 1,
-          sources: [sourceEntry]
-        };
-        findingsMap.set(email, item);
-        findings.push(item);
-        emitEmailFound(item);
-      }
+  function recordEmail(rawEmail, sourceUrl, sourceType, mainPageUrl) {
+    if (!rawEmail) return;
+    const cleanEmails = normalizeAndExtractEmails(rawEmail);
+    for (const em of cleanEmails) {
+      recordCleanEmail(em, sourceUrl, sourceType, mainPageUrl);
     }
   }
 
   crawlState.recordEmail = recordEmail;
+  crawlState.recordCleanEmail = recordCleanEmail;
   crawlState.updatePdfStatus = (url, status, emailsFound) => {
     const rec = discoveredPdfs.find((p) => p.url === url);
     if (rec) {
@@ -1868,35 +1872,19 @@ async function runProductionCrawl(crawlState) {
   if (Array.isArray(initialFindings)) {
     for (const f of initialFindings) {
       if (f && f.email) {
-        const cleanEmails = normalizeAndExtractEmails(f.email);
-        for (const em of cleanEmails) {
-          const item = {
-            email: em,
-            sourceType: f.sourceType || "HTML (Live Tab)",
-            sourceUrl: f.sourceUrl || startUrl,
-            mainPageUrl: f.mainPageUrl || startUrl,
-            occurrences: 1,
-            sources: [
-              {
-                sourceType: f.sourceType || "HTML (Live Tab)",
-                sourceUrl: f.sourceUrl || startUrl,
-                mainPageUrl: f.mainPageUrl || startUrl,
-                timestamp: new Date().toISOString()
-              }
-            ]
-          };
-          findingsMap.set(em, item);
-          findings.push(item);
-        }
+        recordEmail(f.email, f.sourceUrl, f.sourceType || "HTML (Live Tab)", f.mainPageUrl);
       }
     }
   }
 
   // Fast sitemap pre-discovery: seeds official corporate & catalog pages immediately
   // CRITICAL FIX: Filters out PDF and image URLs directly into their respective queues
-  // so that PDF documents are never mistakenly crawled as HTML web pages
+  // and batches queue additions to eliminate O(n²) synchronous unshift freeze
   try {
     const sitemapUrls = await probeSitemaps(baseOrigin, crawlAbortController.signal);
+    const prioritySeeds = [];
+    const normalSeeds = [];
+
     for (const smUrl of sitemapUrls) {
       if (crawlState.aborted) break;
       const cUrl = cleanAndNormalizeUrl(smUrl, startUrl);
@@ -1912,12 +1900,19 @@ async function runProductionCrawl(crawlState) {
         if (!enqueuedHtmlUrls.has(cUrl)) {
           enqueuedHtmlUrls.add(cUrl);
           if (HIGH_PRIORITY_REGEX.test(cUrl)) {
-            htmlQueue.unshift(cUrl);
-          } else if (htmlQueue.length < maxPages) {
-            htmlQueue.push(cUrl);
+            prioritySeeds.push(cUrl);
+          } else {
+            normalSeeds.push(cUrl);
           }
         }
       }
+    }
+
+    if (prioritySeeds.length > 0) {
+      htmlQueue.unshift(...prioritySeeds.slice(-500));
+    }
+    if (normalSeeds.length > 0 && htmlQueue.length < maxPages) {
+      htmlQueue.push(...normalSeeds.slice(0, maxPages - htmlQueue.length));
     }
   } catch (smErr) {
     console.debug("Sitemap probe notice:", smErr);
@@ -2126,7 +2121,7 @@ async function runProductionCrawl(crawlState) {
           const svgEmails = normalizeAndExtractEmails(svgText);
           if (svgEmails.length > 0) {
             for (const em of svgEmails) {
-              recordEmail(em, currentUrl, "Website Image (SVG)", mainSitePage);
+              recordCleanEmail(em, currentUrl, "Website Image (SVG)", mainSitePage);
             }
             if (imgRec) imgRec.status = `Active (${svgEmails.length} emails)`;
           } else {
@@ -2164,7 +2159,7 @@ async function runProductionCrawl(crawlState) {
         if (SKIP_EXT_REGEX.test(currentUrl)) return;
 
         const res = await fetch(currentUrl, {
-          credentials: "include",
+          credentials: "omit",
           headers: STANDARD_FETCH_HEADERS,
           signal: createFetchSignal(3500)
         });
@@ -2179,6 +2174,7 @@ async function runProductionCrawl(crawlState) {
             const finalObj = new URL(finalUrl);
             if (normalizeHost(finalObj.hostname) !== normalizeHost(baseHostname)) {
               baseHostname = finalObj.hostname;
+              baseOrigin = finalObj.origin;
             }
           } catch {}
         }
@@ -2248,7 +2244,7 @@ async function runProductionCrawl(crawlState) {
       const htmlMatches = normalizeAndExtractEmails(html);
       const allMatches = new Set([...textMatches, ...htmlMatches]);
       for (const m of allMatches) {
-        recordEmail(m, finalUrl, "HTML", finalUrl);
+        recordCleanEmail(m, finalUrl, "HTML", finalUrl);
       }
 
       // Collect website corporate images for OCR and visual restriction checks
@@ -2269,7 +2265,7 @@ async function runProductionCrawl(crawlState) {
             const emailsInMailto = normalizeAndExtractEmails(rawMailto);
             if (emailsInMailto.length > 0) {
               for (const em of emailsInMailto) {
-                recordEmail(em, finalUrl, "HTML (mailto)", finalUrl);
+                recordCleanEmail(em, finalUrl, "HTML (mailto)", finalUrl);
               }
             } else {
               const addr = rawLink.slice(7).split("?")[0].trim();
