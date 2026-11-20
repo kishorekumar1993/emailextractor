@@ -832,6 +832,22 @@ function extractAllLinksAndText(html) {
     }
   }
 
+  // 4. Schema.org JSON-LD Structured Data extraction (harvests organization emails and sameAs / url links)
+  const jsonLdRegex = /<script\b[^>]*\btype=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let jsonLdMatch;
+  while ((jsonLdMatch = jsonLdRegex.exec(html)) !== null) {
+    const rawJson = jsonLdMatch[1];
+    if (rawJson) {
+      const urlMatches = rawJson.match(/"(?:url|sameAs)":\s*(?:"([^"]+)"|\[([^\]]+)\])/gi);
+      if (urlMatches) {
+        for (const um of urlMatches) {
+          const links = um.match(/https?:\/\/[^\s"',]+/gi);
+          if (links) rawLinks.push(...links);
+        }
+      }
+    }
+  }
+
   const cleanHtml = html
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
     .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ");
@@ -1240,6 +1256,107 @@ function emitProcessImage(imageTask) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// 5. CORPORATE SISTER DOMAIN & TLD DISCOVERY ENGINE
+// Solves missing emails on regional portals (IndiaMART, TradeIndia, B2B) & alternate TLDs
+// ═══════════════════════════════════════════════════════════════════════
+
+function generateSisterDomains(domain) {
+  const norm = (domain || "").toLowerCase().replace(/^www\./, "");
+  const parts = norm.split(".");
+  if (parts.length < 2) return [];
+
+  const sld = parts[0];
+  const tld = parts.slice(1).join(".");
+  const candidates = new Set();
+
+  // Strip geographic or corporate modifiers (e.g. torquemasterindia -> torquemaster)
+  const geoKeywords = [
+    "india", "australia", "aust", "uk", "usa", "america", "global",
+    "intl", "international", "group", "corp", "tools", "industries", "technologies", "tech"
+  ];
+
+  for (const kw of geoKeywords) {
+    if (sld.includes(kw) && sld.length > kw.length + 2) {
+      const stripped = sld.replace(kw, "");
+      if (stripped.length >= 3) {
+        candidates.add(`${stripped}.in`);
+        candidates.add(`${stripped}.com`);
+        candidates.add(`${stripped}.co.in`);
+        candidates.add(`${stripped}.com.au`);
+        candidates.add(`${stripped}.co.uk`);
+        candidates.add(`${stripped}.org`);
+        candidates.add(`${stripped}.net`);
+      }
+    }
+  }
+
+  // Common TLD switches (e.g. .com <-> .in, .co.in, .com.au, .co.uk)
+  if (tld === "com") {
+    candidates.add(`${sld}.in`);
+    candidates.add(`${sld}.co.in`);
+    candidates.add(`${sld}.com.au`);
+    candidates.add(`${sld}.co.uk`);
+    candidates.add(`${sld}.net`);
+    candidates.add(`${sld}.org`);
+  } else if (tld === "in" || tld === "co.in") {
+    candidates.add(`${sld}.com`);
+    candidates.add(`${sld}india.com`);
+  } else if (tld === "com.au") {
+    candidates.add(`${sld}.com`);
+  } else if (tld === "co.uk") {
+    candidates.add(`${sld}.com`);
+  }
+
+  candidates.delete(norm);
+  return Array.from(candidates).slice(0, 8);
+}
+
+async function discoverCompanySisterDomainEmails(startUrl, companyKeywords, normalizeAndExtractEmailsFn) {
+  try {
+    const startObj = new URL(startUrl);
+    const sisterDomains = generateSisterDomains(startObj.hostname);
+    if (!sisterDomains.length) return [];
+
+    const foundEmails = new Map();
+    const probePromises = sisterDomains.map(async (domain) => {
+      const testUrls = [`https://www.${domain}/`, `https://${domain}/`];
+      for (const tUrl of testUrls) {
+        try {
+          const res = await fetch(tUrl, {
+            credentials: "omit",
+            headers: STANDARD_FETCH_HEADERS,
+            signal: AbortSignal.timeout(4500)
+          });
+          if (res.ok) {
+            const html = await res.text();
+            if (html && html.length > 500) {
+              const lowerHtml = html.toLowerCase();
+              const matchesCompany =
+                companyKeywords.length === 0 ||
+                companyKeywords.some((kw) => kw.length >= 4 && lowerHtml.includes(kw.toLowerCase()));
+
+              if (matchesCompany) {
+                const extracted = normalizeAndExtractEmailsFn(html);
+                for (const em of extracted) {
+                  foundEmails.set(em, { email: em, sourceUrl: tUrl, domain });
+                }
+                if (foundEmails.size > 0) break;
+              }
+            }
+          }
+        } catch {}
+      }
+    });
+
+    await Promise.all(probePromises);
+    return Array.from(foundEmails.values());
+  } catch (err) {
+    console.warn("Sister domain probe error:", err);
+    return [];
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // 6. PRODUCTION CRAWLER EXECUTION CORE
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -1263,6 +1380,7 @@ async function runProductionCrawl(crawlState) {
 
   const discoveredPdfs = [];
   const discoveredImages = [];
+  const discoveredCompanyKeywords = new Set();
   let pdfsAvailableCount = 0;
 
   // Multi-source email tracking: Map<emailString, FindingObject>
@@ -1585,6 +1703,27 @@ async function runProductionCrawl(crawlState) {
 
       const { text, rawLinks, directPdfCandidates } = extractAllLinksAndText(html);
 
+      // Extract company brand names from title, metadata, and logo alt text for sister-domain resolution
+      const titleMatch = html.match(/<title\b[^>]*>(.*?)<\/title>/i);
+      if (titleMatch && titleMatch[1]) {
+        const parts = titleMatch[1].replace(/&amp;/g, "&").split(/[-–|,;:]+/);
+        if (parts[0] && parts[0].trim().length >= 3) {
+          discoveredCompanyKeywords.add(parts[0].trim());
+          const clean = parts[0].replace(/\b(?:private\s+limited|pvt\.?\s*ltd\.?|ltd\.?|inc\.?|llc|corp\.?|gmbh)\b/gi, "").trim();
+          if (clean.length >= 3) discoveredCompanyKeywords.add(clean);
+        }
+      }
+      const compInp = html.match(/\bname=["']company_name["'][^>]*\bvalue=["']([^"']+)["']/i);
+      if (compInp && compInp[1]) {
+        discoveredCompanyKeywords.add(compInp[1].trim());
+        const clean = compInp[1].replace(/\b(?:private\s+limited|pvt\.?\s*ltd\.?|ltd\.?|inc\.?|llc)\b/gi, "").trim();
+        if (clean.length >= 3) discoveredCompanyKeywords.add(clean);
+      }
+      const logoAlt = html.match(/<img\b[^>]*\balt=["']([^"']*(?:ltd|limited|tools|company|corp)[^"']*)["']/i);
+      if (logoAlt && logoAlt[1]) {
+        discoveredCompanyKeywords.add(logoAlt[1].trim());
+      }
+
       // ── Function 1: Restricted Business Detection (text-based, core pages) ──
       if (!siteRestrictedRecord) {
         const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
@@ -1733,6 +1872,43 @@ async function runProductionCrawl(crawlState) {
   }
 
   await Promise.all(workerPromises);
+
+  // ── Global Fallback: Sister Domain & Alternate TLD Company Probe ──
+  // If no emails were discovered in static catalog/HTML pages (common on IndiaMART, TradeIndia, regional domains),
+  // probe official sister domains (e.g. torquemasterindia.com -> torquemaster.in)
+  if (findings.length === 0 && !crawlState.aborted && !siteRestrictedRecord) {
+    emitProgress({
+      pagesCrawled: visitedUrls.size,
+      pdfsCrawled: visitedPdfs.size,
+      pdfsAvailable: pdfsAvailableCount,
+      imagesScanned: visitedImages.size,
+      queueRemaining: 0,
+      currentUrl: "Probing company domain records & sister TLDs...",
+      findingsCount: findings.length,
+      discoveredPdfsCount: discoveredPdfs.length,
+      discoveredImagesCount: discoveredImages.length,
+      siteRestricted: false,
+      imageWarningsCount: imageWarnings.length
+    });
+
+    const fallbackList = await discoverCompanySisterDomainEmails(
+      startUrl,
+      Array.from(discoveredCompanyKeywords),
+      normalizeAndExtractEmails
+    );
+
+    const startNormHost = normalizeHost(baseHostname);
+
+    for (const item of fallbackList) {
+      const emailDomain = (item.email.split("@")[1] || "").toLowerCase();
+      const isDirectDomain = emailDomain === startNormHost || startNormHost.endsWith(emailDomain);
+      const label = isDirectDomain
+        ? `HTML (Corporate Domain)`
+        : `Sister Domain (${item.domain})`;
+
+      recordEmail(item.email, item.sourceUrl, label, startUrl);
+    }
+  }
 
   emitProgress({
     pagesCrawled: visitedUrls.size,
