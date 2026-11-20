@@ -2010,7 +2010,8 @@ async function runProductionCrawl(crawlState) {
           if (ocrImages) enqueueImageForOcr(cUrl, startUrl);
           continue;
         }
-        if (!enqueuedHtmlUrls.has(cUrl)) {
+        // Cap initial link seeding to maxPages to prevent queue overflow
+        if (!enqueuedHtmlUrls.has(cUrl) && htmlQueue.length + visitedUrls.size < maxPages) {
           enqueuedHtmlUrls.add(cUrl);
           if (HIGH_PRIORITY_REGEX.test(cUrl)) {
             htmlQueue.unshift(cUrl);
@@ -2260,8 +2261,9 @@ async function runProductionCrawl(crawlState) {
             timestamp: new Date().toISOString()
           };
           emitSiteRestricted(siteRestrictedRecord);
-          // Confirmed restricted business: halt crawl immediately
+          // Confirmed restricted business: abort controller kills all in-flight fetches immediately
           crawlState.aborted = true;
+          crawlAbortController.abort();
           return;
         }
       }
@@ -2341,10 +2343,11 @@ async function runProductionCrawl(crawlState) {
         }
 
         const isPriority = HIGH_PRIORITY_REGEX.test(cleanUrl);
-        // FIX Issue 6: Cap queue growth so priority URLs cannot bypass the maxPages limit
-        // indefinitely. Allow up to 20% headroom beyond maxPages for high-priority pages.
-        const queueCap = isPriority ? maxPages * 1.2 : maxPages;
-        if (visitedUrls.size + htmlQueue.length < queueCap) {
+        // Only enqueue if we have not yet reached the page limit.
+        // Priority pages get a small 10% headroom so contact/about pages are not dropped.
+        // Only add to enqueuedHtmlUrls if actually inserted (prevents phantom "already seen" state).
+        const hardCap = isPriority ? Math.ceil(maxPages * 1.1) : maxPages;
+        if (visitedUrls.size + htmlQueue.length < hardCap) {
           enqueuedHtmlUrls.add(cleanUrl);
           if (isPriority) {
             htmlQueue.unshift(cleanUrl);
@@ -2357,6 +2360,8 @@ async function runProductionCrawl(crawlState) {
   }
 
   // ── True Concurrent Worker Pool ──────────────────────────────────────
+  // poolSize declared FIRST so getNextTask() and workerThread() can reference it.
+  const poolSize = Math.min(6, Math.max(1, concurrency || 6));
   let activeWorkersCount = 0;
   let activePdfWorkers = 0;
   let activeImageWorkers = 0;
@@ -2365,28 +2370,33 @@ async function runProductionCrawl(crawlState) {
   function getNextTask() {
     if (crawlState.aborted) return null;
 
-    const poolSize = Math.max(1, concurrency || 8);
-    // Dynamic reservation: dedicate up to ~25% of pool to PDFs and up to ~25% to images
-    // so they are processed concurrently while HTML pages are being crawled
     const maxPdfWorkers = Math.max(1, Math.min(3, Math.floor(poolSize / 3)));
     const maxImageWorkers = Math.max(1, Math.min(2, Math.floor(poolSize / 4)));
 
-    // 1. Concurrent PDF task dispatch (won't starve behind 500 HTML pages)
+    // CRITICAL FIX: When maxPages is reached, the HTML queue may still contain URLs
+    // that getNextTask() cannot schedule (visitedUrls.size >= maxPages). Those stale
+    // items make hasPendingWork appear true forever → infinite loop hang.
+    // Solution: drain stale HTML entries immediately so the queue reflects reality.
+    if (visitedUrls.size >= maxPages && htmlQueue.length > 0) {
+      htmlQueue.length = 0;   // discard unprocessable HTML items in O(1)
+    }
+
+    // 1. PDF dispatch (concurrent, up to maxPdfWorkers slots)
     if (checkPdfs && pdfQueue.length > 0 && activePdfWorkers < maxPdfWorkers) {
       return { currentItem: pdfQueue.shift(), mode: "pdf" };
     }
 
-    // 2. Concurrent Image OCR task dispatch
+    // 2. Image OCR dispatch (concurrent, up to maxImageWorkers slots)
     if (ocrImages && imageOcrQueue.length > 0 && activeImageWorkers < maxImageWorkers) {
       return { currentItem: imageOcrQueue.shift(), mode: "image" };
     }
 
-    // 3. Dispatch HTML page crawl
+    // 3. HTML page crawl (only while under page limit)
     if (htmlQueue.length > 0 && visitedUrls.size < maxPages) {
       return { currentItem: htmlQueue.shift(), mode: "html" };
     }
 
-    // 4. Drain remaining PDF & Image queues when HTML queue is empty or maxPages reached
+    // 4. Drain remaining PDF & Image queues after HTML is exhausted / limit reached
     if (checkPdfs && pdfQueue.length > 0) {
       return { currentItem: pdfQueue.shift(), mode: "pdf" };
     }
@@ -2404,16 +2414,27 @@ async function runProductionCrawl(crawlState) {
   async function workerThread() {
     while (!crawlState.aborted && !allWorkCompleted) {
       const task = getNextTask();
+
       if (!task) {
-        if (activeWorkersCount > 0 || !sitemapSettled) {
-          // Either another worker may enqueue new work, or sitemap is still running.
-          await new Promise((resolve) => setTimeout(resolve, 50));
+        // Case 1: Sitemap not yet settled – new URLs may arrive soon. Wait briefly.
+        if (!sitemapSettled) {
+          await new Promise((r) => setTimeout(r, 60));
           continue;
         }
-        // Grace period: one final peek after a short delay
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        const hasPendingWork = htmlQueue.length > 0 || pdfQueue.length > 0 || imageOcrQueue.length > 0;
-        if (hasPendingWork || activeWorkersCount > 0 || !sitemapSettled) continue;
+
+        // Case 2: Sitemap settled but other workers are active – they may enqueue more work.
+        if (activeWorkersCount > 0) {
+          await new Promise((r) => setTimeout(r, 60));
+          continue;
+        }
+
+        // Case 3: All settled, all idle. Final grace-period check to handle race where
+        // a worker just finished and pushed to queue before decrementing activeWorkersCount.
+        await new Promise((r) => setTimeout(r, 120));
+        if (crawlState.aborted || allWorkCompleted) break;
+        if (htmlQueue.length > 0 || pdfQueue.length > 0 || imageOcrQueue.length > 0) continue;
+        if (activeWorkersCount > 0) continue;
+        // Truly done.
         allWorkCompleted = true;
         break;
       }
@@ -2434,10 +2455,7 @@ async function runProductionCrawl(crawlState) {
     }
   }
 
-  // FIX Issue 4: Cap pool size at 6 to prevent OOM when PDF (25MB) + image (20MB) workers
-  // fire simultaneously. Workers still max out CPU on HTML which is cheap memory-wise.
   const workerPromises = [];
-  const poolSize = Math.min(6, Math.max(1, concurrency || 6));
   for (let w = 0; w < poolSize; w++) {
     workerPromises.push(workerThread());
   }
@@ -2514,6 +2532,10 @@ async function runProductionCrawl(crawlState) {
     imageWarnings
   };
 }
+
+
+
+
 
 
 
