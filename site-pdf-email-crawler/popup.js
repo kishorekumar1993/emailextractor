@@ -312,11 +312,13 @@ async function getOcrWorker() {
           workerPath: chrome.runtime.getURL("lib/worker.min.js"),
           corePath: chrome.runtime.getURL("lib/tesseract-core-simd-lstm.wasm.js"),
           langPath: chrome.runtime.getURL("lib"),
+          workerBlobURL: false,
           errorHandler: (err) => console.warn("Tesseract notice:", err)
         });
         return worker;
       } catch (err) {
         console.error("Failed to initialize Tesseract OCR:", err);
+        ocrWorkerPromise = null;
         return null;
       }
     })();
