@@ -304,20 +304,22 @@ async function getOcrWorker() {
   if (!ocrWorkerPromise) {
     ocrWorkerPromise = (async () => {
       if (typeof Tesseract === "undefined") {
-        console.warn("Tesseract library not loaded");
         return null;
       }
       try {
-        const worker = await Tesseract.createWorker("eng", 1, {
-          workerPath: chrome.runtime.getURL("lib/worker.min.js"),
-          corePath: chrome.runtime.getURL("lib/tesseract-core-simd-lstm.wasm.js"),
-          langPath: chrome.runtime.getURL("lib"),
-          workerBlobURL: false,
-          errorHandler: (err) => console.warn("Tesseract notice:", err)
-        });
+        const worker = await Promise.race([
+          Tesseract.createWorker("eng", 1, {
+            workerPath: chrome.runtime.getURL("lib/worker.min.js"),
+            corePath: chrome.runtime.getURL("lib/"),
+            langPath: chrome.runtime.getURL("lib/"),
+            workerBlobURL: false,
+            errorHandler: () => {}
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Worker spawn timeout")), 4000))
+        ]);
         return worker;
       } catch (err) {
-        console.error("Failed to initialize Tesseract OCR:", err);
+        console.warn("OCR worker notice:", err);
         ocrWorkerPromise = null;
         return null;
       }
@@ -332,8 +334,8 @@ let isProcessingImages = false;
 
 function enqueueImageOcr(task) {
   if (!task || !task.imageUrl || processedImages.has(task.imageUrl)) return;
-  if (ocrImagesCheckbox && !ocrImagesCheckbox.checked) return;
-  if (imageOcrQueue.length >= 50) return;
+  if (!ocrImagesCheckbox || !ocrImagesCheckbox.checked) return;
+  if (imageOcrQueue.length >= 3) return;
   imageOcrQueue.push(task);
   processNextImageOcr();
 }
@@ -359,7 +361,7 @@ async function processNextImageOcr() {
       if (!worker) break;
 
       try {
-        const fetchRes = await fetch(task.imageUrl, { signal: AbortSignal.timeout(4000), credentials: "omit" });
+        const fetchRes = await fetch(task.imageUrl, { signal: AbortSignal.timeout(2000), credentials: "omit" });
         if (fetchRes.ok) {
           const blob = await fetchRes.blob();
           objectUrl = URL.createObjectURL(blob);
@@ -377,7 +379,7 @@ async function processNextImageOcr() {
       await new Promise((resolve) => {
         img.onload = resolve;
         img.onerror = resolve;
-        setTimeout(resolve, 3500);
+        setTimeout(resolve, 2000);
       });
 
       if (img.naturalWidth >= 30 && img.naturalHeight >= 15) {
@@ -396,10 +398,15 @@ async function processNextImageOcr() {
         ctx.drawImage(img, 0, 0, w, h);
         const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
 
-        const result = await worker.recognize(dataUrl);
+        const result = await Promise.race([
+          worker.recognize(dataUrl),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("OCR timeout")), 3000))
+        ]);
+
         const ocrText = (result && result.data && result.data.text) ? result.data.text : "";
         if (ocrText && ocrText.length > 3) {
-          const foundEmails = normalizeAndExtractEmails(ocrText);
+          const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
+          const foundEmails = normalizeAndExtractEmails(ocrText, isStrict);
           for (const em of foundEmails) {
             const item = {
               copy: em.toLowerCase().trim(),
@@ -426,14 +433,14 @@ async function processNextImageOcr() {
         }
       }
     } catch (err) {
-      console.debug("OCR error on image:", task.imageUrl, err);
+      console.debug("OCR notice on image:", task.imageUrl, err.message);
     } finally {
       if (objectUrl) {
         URL.revokeObjectURL(objectUrl);
       }
     }
 
-    await new Promise((r) => setTimeout(r, 40));
+    await new Promise((r) => setTimeout(r, 100));
   }
 
   isProcessingImages = false;

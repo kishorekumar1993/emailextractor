@@ -107,7 +107,6 @@ function isContactCandidateImage(imgUrl, alt, title, pageUrl) {
 
   const combined = `${imgUrl} ${alt || ""} ${title || ""}`.toLowerCase();
   if (CONTACT_IMAGE_KEYWORD_REGEX.test(combined)) return true;
-  if (HIGH_PRIORITY_REGEX.test(pageUrl)) return true;
 
   return false;
 }
@@ -1126,26 +1125,28 @@ async function runProductionCrawl(crawlState) {
             }
           }
 
-          // 2. Direct SVG vector text inspection
+          // 2. Direct SVG vector text inspection (only for contact SVGs, max 1.5s timeout)
           if (fullImgUrl.toLowerCase().endsWith(".svg") || fullImgUrl.includes(".svg?")) {
             visitedImages.add(fullImgUrl);
-            fetch(fullImgUrl, { signal: createFetchSignal(2000), credentials: "omit" })
-              .then((r) => (r.ok ? r.text() : ""))
-              .then((svgText) => {
-                if (svgText && svgText.includes("@")) {
-                  const svgEmails = normalizeAndExtractEmails(svgText);
-                  for (const em of svgEmails) {
-                    recordCleanEmail(em, finalUrl, "image", finalUrl, { image: fullImgUrl, sourceType: "image" });
+            if (CONTACT_IMAGE_KEYWORD_REGEX.test(fullImgUrl) || (img.alt && CONTACT_IMAGE_KEYWORD_REGEX.test(img.alt))) {
+              fetch(fullImgUrl, { signal: createFetchSignal(1500), credentials: "omit" })
+                .then((r) => (r.ok ? r.text() : ""))
+                .then((svgText) => {
+                  if (svgText && svgText.includes("@")) {
+                    const svgEmails = normalizeAndExtractEmails(svgText);
+                    for (const em of svgEmails) {
+                      recordCleanEmail(em, finalUrl, "image", finalUrl, { image: fullImgUrl, sourceType: "image" });
+                    }
                   }
-                }
-              })
-              .catch(() => {});
+                })
+                .catch(() => {});
+            }
             continue;
           }
 
-          // 3. Dispatch contact candidate images for OCR recognition in popup
+          // 3. Dispatch contact candidate images for OCR recognition in popup (strict cap: 3 contact images)
           if (crawlState.ocrImages !== false && isContactCandidateImage(fullImgUrl, img.alt, img.title, finalUrl)) {
-            if (enqueuedImageUrls.size < 50) {
+            if (enqueuedImageUrls.size < 3) {
               enqueuedImageUrls.add(fullImgUrl);
               visitedImages.add(fullImgUrl);
               chrome.runtime.sendMessage({
