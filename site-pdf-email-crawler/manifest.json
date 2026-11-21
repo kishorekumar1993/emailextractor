@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Site & PDF Email Detector",
-  "version": "2.0.0",
-  "description": "Ultra-fast crawler to detect and extract corporate emails from websites and PDF documents.",
+  "version": "2.1.0",
+  "description": "Ultra-fast crawler to detect and extract corporate emails from websites, PDF documents, and contact images via offline OCR.",
   "permissions": ["activeTab", "storage", "tabs", "scripting"],
   "host_permissions": ["<all_urls>"],
   "action": {
@@ -10,5 +10,17 @@
   },
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "lib/worker.min.js",
+        "lib/tesseract-core-simd-lstm.wasm.js",
+        "lib/tesseract-core-simd-lstm.wasm",
+        "lib/eng.traineddata",
+        "lib/eng.traineddata.gz"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

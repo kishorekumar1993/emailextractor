@@ -260,7 +260,7 @@
 
     .stats-bar {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       gap: 8px;
       margin-bottom: 12px;
     }
@@ -437,6 +437,10 @@
         <input type="checkbox" id="checkPdfs" checked />
         <strong>Scan PDF documents for emails (Catalogs, brochures, spec sheets, certificates)</strong>
       </label>
+      <label class="checkbox-label" title="Extract email text from logos, banners, certificates, and contact graphics using offline OCR">
+        <input type="checkbox" id="ocrImages" checked />
+        <strong>Scan contact images via OCR (Detect email addresses inside graphics & banners)</strong>
+      </label>
       <label class="checkbox-label">
         <input type="checkbox" id="includeSubdomains" />
         Include Subdomains
@@ -467,6 +471,10 @@
       <div class="stat-lbl">PDFs Checked</div>
     </div>
     <div class="stat-card">
+      <div id="statImages" class="stat-val">0</div>
+      <div class="stat-lbl">Images OCR</div>
+    </div>
+    <div class="stat-card">
       <div id="statEmails" class="stat-val">0</div>
       <div class="stat-lbl">Emails Found</div>
     </div>
@@ -475,6 +483,8 @@
       <div class="stat-lbl">Queue Remaining</div>
     </div>
   </div>
+
+  <div id="ocrStatus" style="display:none; font-size:11px; padding:6px 10px; background:#eff6ff; border:1px solid #bfdbfe; color:#1d4ed8; border-radius:6px; margin-bottom:8px; font-weight:600;">🔍 OCR: Scanning contact image...</div>
 
   <div id="statusText" class="status-text">Ready. Open website and click "Crawl Website".</div>
 
@@ -500,6 +510,7 @@
     </table>
   </div>
 
+  <script src="lib/tesseract.min.js"></script>
   <script src="popup.js"></script>
 </body>
 

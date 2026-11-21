@@ -62,7 +62,27 @@ const SKIP_EXT_REGEX = /\.(css|js|jsx|ts|tsx|map|json|xml|rss|atom|woff|woff2|tt
 const IGNORE_PATH_REGEX = /\/(?:wp-includes|wp-json|xmlrpc\.php|cdn-cgi|cgi-bin|node_modules|\.well-known)\//i;
 
 // High priority contact, catalog, download, and about pages across all languages
-const HIGH_PRIORITY_REGEX = /(?:contact|about|enquiry|inquiry|reach-us|get-in-touch|support|feedback|connect|team|staff|office|location|imprint|impressum|profile|catalog|catalogue|katalog|download|brochure|cert|spec|company|聯絡|關於|簡介|型錄|下載)/i;
+const HIGH_PRIORITY_REGEX = /(?:contact|about|enquiry|inquiry|reach-us|get-in-touch|support|feedback|connect|team|staff|office|location|imprint|impressum|profile|catalog|catalogue|katalog|download|brochure|cert|spec|company|video|animation|media|tour|corp|exhibition|聯絡|關於|簡介|型錄|下載|影片|影音)/i;
+
+// Contact image keywords to identify banners, certificates, business cards, and contact graphics
+const CONTACT_IMAGE_KEYWORD_REGEX = /(?:contact|email|e-mail|mail|address|card|footer|header|banner|cert|certificate|duns|iso|reach|info|support|tel|phone|sales|service|corp|logo|letter|stamp|license|bizcard|vcard|about|inquiry|consult|agent|office|branch|touch|sign|badge|profile|brochure|catalog|qr|聯絡|信箱|郵件|名片|證書|證照|電話|諮詢)/i;
+const SKIP_IMAGE_NAME_REGEX = /(?:@2x|@3x|icon|arrow|bullet|dot|pixel|avatar|emoji|spinner|placeholder|star|social|facebook|twitter|instagram|linkedin|youtube)\b/i;
+
+function isContactCandidateImage(imgUrl, alt, title, pageUrl) {
+  if (!imgUrl || typeof imgUrl !== "string") return false;
+  const clean = imgUrl.split("?")[0].toLowerCase();
+  if (SKIP_IMAGE_NAME_REGEX.test(clean)) return false;
+
+  const hasImageExt = /\.(png|jpe?g|webp|bmp|gif|tiff?|svg)($|\?)/i.test(imgUrl);
+  const looksLikeImagePath = /\/(?:images?|img|photos?|pics?|upload|assets?|static|media|files?|graphics?)\//i.test(imgUrl);
+  if (!hasImageExt && !looksLikeImagePath) return false;
+
+  const combined = `${imgUrl} ${alt || ""} ${title || ""}`.toLowerCase();
+  if (CONTACT_IMAGE_KEYWORD_REGEX.test(combined)) return true;
+  if (HIGH_PRIORITY_REGEX.test(pageUrl)) return true;
+
+  return false;
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // 1. STRICT EMAIL VALIDATION & DE-OBFUSCATION PIPELINE
@@ -401,7 +421,7 @@ function extractAllLinksAndMedia(html) {
     }
   }
 
-  // 3. Images: img tags, picture sources, data-src (extract alt, title, and image URLs)
+  // 3. Images: img tags, picture sources, responsive srcset, background images, and meta images
   const imgRegex = /<img\b([^>]*)>/gi;
   let imgMatch;
   while ((imgMatch = imgRegex.exec(html)) !== null) {
@@ -414,6 +434,55 @@ function extractAllLinksAndMedia(html) {
     const title = titleMatch ? titleMatch[1] || titleMatch[2] || titleMatch[3] || "" : "";
     if (imgSrc && !imgSrc.startsWith("data:")) {
       imageCandidates.push({ url: imgSrc.trim(), alt, title });
+    }
+
+    // Responsive srcset attributes in <img>
+    const srcsetMatch = attrs.match(/\b(?:srcset|data-srcset)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    if (srcsetMatch) {
+      const srcsetValue = srcsetMatch[1] || srcsetMatch[2] || srcsetMatch[3] || "";
+      for (const entry of srcsetValue.split(",")) {
+        const candidate = entry.trim().split(/\s+/)[0];
+        if (candidate && !candidate.startsWith("data:")) {
+          imageCandidates.push({ url: candidate, alt, title });
+        }
+      }
+    }
+  }
+
+  // <source> tags in <picture> or media elements
+  const sourceRegex = /<source\b([^>]*)>/gi;
+  let srcTagMatch;
+  while ((srcTagMatch = sourceRegex.exec(html)) !== null) {
+    const attrs = srcTagMatch[1] || "";
+    const srcMatch = attrs.match(/\b(?:srcset|data-srcset|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    const srcVal = srcMatch ? srcMatch[1] || srcMatch[2] || srcMatch[3] : "";
+    if (srcVal && !srcVal.startsWith("data:")) {
+      for (const entry of srcVal.split(",")) {
+        const candidate = entry.trim().split(/\s+/)[0];
+        if (candidate && !candidate.startsWith("data:")) {
+          imageCandidates.push({ url: candidate, alt: "", title: "" });
+        }
+      }
+    }
+  }
+
+  // OpenGraph, Twitter, and thumbnail meta images
+  const metaImgRegex = /<meta\b[^>]*(?:property|name)\s*=\s*["'](?:og:image|twitter:image|thumbnail)["'][^>]*content\s*=\s*["']([^"']+)["']/gi;
+  let metaImgMatch;
+  while ((metaImgMatch = metaImgRegex.exec(html)) !== null) {
+    const mUrl = metaImgMatch[1];
+    if (mUrl && !mUrl.startsWith("data:")) {
+      imageCandidates.push({ url: mUrl.trim(), alt: "meta-image", title: "" });
+    }
+  }
+
+  // Inline CSS background images
+  const bgImgRegex = /style\s*=\s*["'][^"']*url\(\s*(?:['"]?)([^'")]+)(?:['"]?)\s*\)[^"']*["']/gi;
+  let bgImgMatch;
+  while ((bgImgMatch = bgImgRegex.exec(html)) !== null) {
+    const bgUrl = bgImgMatch[1];
+    if (bgUrl && !bgUrl.startsWith("data:")) {
+      imageCandidates.push({ url: bgUrl.trim(), alt: "background-image", title: "" });
     }
   }
 
@@ -686,8 +755,10 @@ async function runProductionCrawl(crawlState) {
 
   const enqueuedHtmlUrls = new Set([initialUrl]);
   const enqueuedPdfUrls = new Set();
+  const enqueuedImageUrls = new Set();
   const visitedUrls = new Set();
   const visitedPdfs = new Set();
+  const visitedImages = new Set();
 
   const discoveredCompanyKeywords = new Set();
   const findingsMap = new Map();
@@ -696,6 +767,7 @@ async function runProductionCrawl(crawlState) {
   crawlState.findings = findings;
   crawlState.visitedUrls = visitedUrls;
   crawlState.visitedPdfs = visitedPdfs;
+  crawlState.visitedImages = visitedImages;
 
   function recordCleanEmail(email, sourceUrl, sourceType, mainPageUrl, extraMeta = {}) {
     if (!email || !isValidEmail(email)) return;
@@ -991,15 +1063,50 @@ async function runProductionCrawl(crawlState) {
         recordCleanEmail(m, finalUrl, "html", finalUrl);
       }
 
-      // Extract emails from image alt/title metadata
+      // Extract emails from image alt/title metadata, SVG vector graphics, and contact image candidates
       if (Array.isArray(imageCandidates)) {
         for (const img of imageCandidates) {
+          const fullImgUrl = cleanAndNormalizeUrl(img.url, finalUrl);
+          if (!fullImgUrl || visitedImages.has(fullImgUrl)) continue;
+
+          // 1. Direct alt/title text inspection
           const combinedImgText = `${img.alt || ""} ${img.title || ""}`;
           if (combinedImgText.includes("@") || combinedImgText.includes("[at]")) {
             const imgEmails = normalizeAndExtractEmails(combinedImgText);
             for (const em of imgEmails) {
-              const fullImgUrl = cleanAndNormalizeUrl(img.url, finalUrl);
               recordCleanEmail(em, finalUrl, "image", finalUrl, { image: fullImgUrl, sourceType: "image" });
+            }
+          }
+
+          // 2. Direct SVG vector text inspection
+          if (fullImgUrl.toLowerCase().endsWith(".svg") || fullImgUrl.includes(".svg?")) {
+            visitedImages.add(fullImgUrl);
+            fetch(fullImgUrl, { signal: createFetchSignal(2000), credentials: "omit" })
+              .then((r) => (r.ok ? r.text() : ""))
+              .then((svgText) => {
+                if (svgText && svgText.includes("@")) {
+                  const svgEmails = normalizeAndExtractEmails(svgText);
+                  for (const em of svgEmails) {
+                    recordCleanEmail(em, finalUrl, "image", finalUrl, { image: fullImgUrl, sourceType: "image" });
+                  }
+                }
+              })
+              .catch(() => {});
+            continue;
+          }
+
+          // 3. Dispatch contact candidate images for OCR recognition in popup
+          if (crawlState.ocrImages !== false && isContactCandidateImage(fullImgUrl, img.alt, img.title, finalUrl)) {
+            if (enqueuedImageUrls.size < 50) {
+              enqueuedImageUrls.add(fullImgUrl);
+              visitedImages.add(fullImgUrl);
+              chrome.runtime.sendMessage({
+                type: "PROCESS_IMAGE_OCR",
+                imageUrl: fullImgUrl,
+                mainPageUrl: finalUrl,
+                altText: img.alt || "",
+                titleText: img.title || ""
+              }).catch(() => {});
             }
           }
         }
@@ -1197,6 +1304,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       maxPages: msg.maxPages || 500,
       concurrency: msg.concurrency || 8,
       checkPdfs: msg.checkPdfs !== false,
+      ocrImages: msg.ocrImages !== false,
       includeSubdomains: !!msg.includeSubdomains,
       initialFindings: msg.initialFindings || [],
       initialLinks: msg.initialLinks || [],
@@ -1257,6 +1365,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       });
     } else {
       sendResponse({ ok: true, isCrawling: false, findings: [], stats: { pagesCrawled: 0, pdfsChecked: 0 } });
+    }
+    return false;
+  }
+
+  if (msg.type === "EMAIL_FOUND" && msg.finding) {
+    if (activeCrawl && Array.isArray(activeCrawl.findings)) {
+      const email = (msg.finding.copy || msg.finding.email || "").trim().toLowerCase();
+      if (email && !activeCrawl.findings.some((f) => (f.copy || f.email).toLowerCase() === email)) {
+        activeCrawl.findings.push(msg.finding);
+      }
     }
     return false;
   }
