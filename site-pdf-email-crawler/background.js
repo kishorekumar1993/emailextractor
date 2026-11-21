@@ -234,6 +234,10 @@ function isValidEmail(email, filterCompliance = true) {
 function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   if (!rawText || typeof rawText !== "string") return [];
 
+  // Hard cap — prevents catastrophic regex backtracking / high CPU on huge binary blobs or pages
+  const MAX = 1_200_000; // 1.2 MB
+  if (rawText.length > MAX) rawText = rawText.slice(0, MAX);
+
   const found = new Set();
   function checkAndAdd(candidate) {
     if (!candidate) return;
@@ -294,10 +298,15 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
     .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})\b/g, "$1@$2")
     .replace(/\b([a-zA-Z0-9-]+)\s+(?:DOT)\s+([a-zA-Z]{2,24})\b/g, "$1.$2");
 
-  // 8. Spaced emails: "info @ company . com"
+  // 8. Spaced emails: "info @ company . com" (bounded, safe, no nested quantifiers)
   deobfuscated = deobfuscated.replace(
-    /\b([a-zA-Z0-9._%+-]+(?:\s*\.\s*[a-zA-Z0-9._%+-]+)*)\s*@\s*([a-zA-Z0-9-]+(?:\s*\.\s*[a-zA-Z0-9-]+)*\s*\.\s*[a-zA-Z]{2,24})\b/g,
-    (_, localPart, domainPart) => `${localPart.replace(/\s+/g, "")}@${domainPart.replace(/\s+/g, "")}`
+    /\b([a-zA-Z0-9_%+-]{1,40})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z]{2,24})\b/g,
+    "$1@$2.$3"
+  );
+  // Second pass for dotted local part e.g. "first . last @ domain . com" (safe bounded)
+  deobfuscated = deobfuscated.replace(
+    /\b([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z]{2,24})\b/g,
+    "$1.$2@$3.$4"
   );
 
   // 8.5. Extract from raw HTML attributes: value="", content="", data-*, action="", alt="", title=""
@@ -972,8 +981,9 @@ async function runProductionCrawl(crawlState) {
     }
   }
 
-  // Non-blocking background sitemap pre-discovery: feeds real sitemap URLs dynamically into queue
-  probeSitemaps(baseOrigin, crawlAbortController.signal)
+  // Background sitemap discovery: feeds sitemap URLs dynamically into crawl queue
+  let sitemapFinished = false;
+  const sitemapPromise = probeSitemaps(baseOrigin, crawlAbortController.signal)
     .then((sitemapUrls) => {
       if (crawlState.aborted || !Array.isArray(sitemapUrls)) return;
       const prioritySeeds = [];
@@ -1003,7 +1013,10 @@ async function runProductionCrawl(crawlState) {
         htmlQueue.push(...normalSeeds.slice(0, maxPages - htmlQueue.length));
       }
     })
-    .catch(() => {});
+    .catch(() => {})
+    .finally(() => {
+      sitemapFinished = true;
+    });
 
   // ── Worker Task Processor ──────────────────────────────────────────
   async function processTask(currentItem, mode) {
@@ -1046,9 +1059,11 @@ async function runProductionCrawl(crawlState) {
         let extractedPdfEmails = [];
         try {
           const uint8 = new Uint8Array(buffer);
-          const maxScanBytes = Math.min(uint8.length, 6 * 1024 * 1024);
+          const maxScanBytes = Math.min(uint8.length, 2 * 1024 * 1024); // 2 MB is plenty for PDF text/metadata
           const binaryStr = new TextDecoder("latin1").decode(uint8.subarray(0, maxScanBytes));
-          extractedPdfEmails = normalizeAndExtractEmails(binaryStr);
+          if (binaryStr.includes("@")) {
+            extractedPdfEmails = normalizeAndExtractEmails(binaryStr);
+          }
         } catch {}
 
         for (const em of extractedPdfEmails) {
@@ -1292,6 +1307,12 @@ async function runProductionCrawl(crawlState) {
           continue;
         }
 
+        // If sitemap probe is still running within the first 4.5 seconds, wait for it before giving up
+        if (!sitemapFinished && (Date.now() - crawlStartTime < 4500)) {
+          await new Promise((r) => setTimeout(r, 100));
+          continue;
+        }
+
         // Grace period check: 5 checks of 100ms
         idleWaitAttempts++;
         if (idleWaitAttempts < 6) {
@@ -1333,7 +1354,25 @@ async function runProductionCrawl(crawlState) {
     workerPromises.push(workerThread());
   }
 
-  await Promise.all(workerPromises);
+  // Crawl Watchdog: 3 minutes hard cap guarantees no worker can freeze indefinitely
+  const CRAWL_WATCHDOG_MS = 3 * 60 * 1000;
+  let watchdogFired = false;
+  const watchdog = setTimeout(() => {
+    watchdogFired = true;
+    console.warn("[crawl] Watchdog timer fired (3m limit), terminating crawl gracefully.");
+    crawlState.aborted = true;
+    allWorkCompleted = true;
+    if (crawlAbortController) {
+      crawlAbortController.abort();
+    }
+  }, CRAWL_WATCHDOG_MS);
+
+  try {
+    await Promise.all(workerPromises);
+    await sitemapPromise;
+  } finally {
+    clearTimeout(watchdog);
+  }
 
   // ── Sister Domain Fallback & Enrichment Probe ──────────────────────
   const hasOnlyGenericEmail = findings.length > 0 && findings.every((f) => {

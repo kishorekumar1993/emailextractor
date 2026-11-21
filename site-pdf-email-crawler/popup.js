@@ -37,6 +37,37 @@ const windowModeBadge = document.getElementById("windowModeBadge");
 let currentFindings = [];
 const emailRowsMap = new Map();
 let isCrawling = false;
+let statusPollTimer = null;
+
+function startStatusPoll() {
+  stopStatusPoll();
+  statusPollTimer = setInterval(async () => {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: "GET_CRAWL_STATUS" });
+      if (!res || !res.ok) return;
+      if (!res.isCrawling && isCrawling) {
+        // Background died, finished silently, or service worker recycled
+        isCrawling = false;
+        startBtn.style.display = "inline-flex";
+        stopBtn.style.display = "none";
+        statusText.textContent = res.aborted
+          ? "Crawl stopped."
+          : `Crawl completed! Extracted ${currentFindings.length} unique emails.`;
+        if (Array.isArray(res.findings)) {
+          res.findings.forEach(registerFoundEmail);
+        }
+        stopStatusPoll();
+      }
+    } catch {}
+  }, 2500);
+}
+
+function stopStatusPoll() {
+  if (statusPollTimer) {
+    clearInterval(statusPollTimer);
+    statusPollTimer = null;
+  }
+}
 
 function escapeHtml(str) {
   if (!str) return "";
@@ -237,6 +268,8 @@ function isPopupValidEmail(email, filterCompliance = true) {
 
 function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   if (!rawText || typeof rawText !== "string") return [];
+  const MAX = 1_200_000; // 1.2 MB hard cap prevents UI freeze on huge blobs
+  if (rawText.length > MAX) rawText = rawText.slice(0, MAX);
   const found = new Set();
 
   let deobf = rawText
@@ -245,7 +278,8 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
     .replace(/\s*(?:\[dot\]|\(dot\)|\{dot\}|\[DOT\]|\(DOT\)|_dot_|\/\*dot\*\/)\s*/g, ".")
     .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})\b/g, "$1@$2")
     .replace(/\b([a-zA-Z0-9-]+)\s+(?:DOT)\s+([a-zA-Z]{2,24})\b/g, "$1.$2")
-    .replace(/\b([a-zA-Z0-9._%+-]+(?:\s*\.\s*[a-zA-Z0-9._%+-]+)*)\s*@\s*([a-zA-Z0-9-]+(?:\s*\.\s*[a-zA-Z0-9-]+)*\s*\.\s*[a-zA-Z]{2,24})\b/g, (_, l, d) => `${l.replace(/\s+/g, "")}@${d.replace(/\s+/g, "")}`)
+    .replace(/\b([a-zA-Z0-9_%+-]{1,40})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z]{2,24})\b/g, "$1@$2.$3")
+    .replace(/\b([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z]{2,24})\b/g, "$1.$2@$3.$4")
     .replace(/@([a-zA-Z0-9-]+),([a-zA-Z]{2,10})/g, "@$1.$2");
 
   const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24}/g;
@@ -318,6 +352,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 
   if (msg.type === "CRAWL_COMPLETED") {
     isCrawling = false;
+    stopStatusPoll();
     startBtn.style.display = "inline-flex";
     stopBtn.style.display = "none";
     const d = msg.data || {};
@@ -330,6 +365,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 
   if (msg.type === "CRAWL_FAILED") {
     isCrawling = false;
+    stopStatusPoll();
     startBtn.style.display = "inline-flex";
     stopBtn.style.display = "none";
     statusText.textContent = `Failed: ${msg.error || "Crawl Error"}`;
@@ -373,6 +409,7 @@ startBtn.addEventListener("click", async () => {
   startBtn.style.display = "none";
   stopBtn.style.display = "inline-flex";
   isCrawling = true;
+  startStatusPoll();
   statusText.textContent = "Connecting to website and crawling pages...";
 
   chrome.runtime.sendMessage(
@@ -389,6 +426,7 @@ startBtn.addEventListener("click", async () => {
     (response) => {
       if (chrome.runtime.lastError) {
         isCrawling = false;
+        stopStatusPoll();
         startBtn.style.display = "inline-flex";
         stopBtn.style.display = "none";
         statusText.textContent = `Error: ${chrome.runtime.lastError.message}`;
@@ -397,6 +435,7 @@ startBtn.addEventListener("click", async () => {
 
       if (!response || !response.ok) {
         isCrawling = false;
+        stopStatusPoll();
         startBtn.style.display = "inline-flex";
         stopBtn.style.display = "none";
         statusText.textContent = "Failed to initiate crawl process.";
@@ -408,6 +447,7 @@ startBtn.addEventListener("click", async () => {
 // ── Stop Crawl Handler ───────────────────────────────────────────────
 stopBtn.addEventListener("click", () => {
   isCrawling = false;
+  stopStatusPoll();
   if (ocrStatus) ocrStatus.style.display = "none";
   startBtn.style.display = "inline-flex";
   stopBtn.style.display = "none";
@@ -595,8 +635,10 @@ function syncCrawlState(res) {
     startBtn.style.display = "none";
     stopBtn.style.display = "inline-flex";
     statusText.textContent = "Crawling in progress...";
+    startStatusPoll();
   } else {
     isCrawling = false;
+    stopStatusPoll();
     startBtn.style.display = "inline-flex";
     stopBtn.style.display = "none";
     if (currentFindings.length > 0) {
