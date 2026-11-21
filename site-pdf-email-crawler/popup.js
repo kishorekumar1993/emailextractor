@@ -412,6 +412,44 @@ startBtn.addEventListener("click", async () => {
   startStatusPoll();
   statusText.textContent = "Connecting to website and crawling pages...";
 
+  let initialFindings = [];
+  let initialLinks = [];
+  try {
+    const activeTab = await detectActiveTab();
+    if (activeTab && activeTab.id && activeTab.url && (activeTab.url.startsWith("http://") || activeTab.url.startsWith("https://"))) {
+      const execRes = await chrome.scripting.executeScript({
+        target: { tabId: activeTab.id },
+        func: () => {
+          const links = Array.from(document.querySelectorAll("a[href], [data-href], [data-url], iframe[src], embed[src]"))
+            .map((el) => el.getAttribute("href") || el.getAttribute("data-href") || el.getAttribute("data-url") || el.getAttribute("src"))
+            .filter(Boolean);
+          const pageHtml = document.documentElement ? document.documentElement.outerHTML : document.body.innerHTML;
+          return { links, pageHtml };
+        }
+      });
+
+      if (execRes && execRes[0] && execRes[0].result) {
+        initialLinks = execRes[0].result.links || [];
+        const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
+        const domEmails = normalizeAndExtractEmails(execRes[0].result.pageHtml || "", isStrict);
+        for (const em of domEmails) {
+          const item = {
+            email: em,
+            sourceType: "HTML (Live Tab)",
+            sourceUrl: activeTab.url,
+            mainPageUrl: activeTab.url,
+            occurrences: 1,
+            sources: [{ sourceType: "HTML (Live Tab)", sourceUrl: activeTab.url, mainPageUrl: activeTab.url, timestamp: new Date().toISOString() }]
+          };
+          initialFindings.push(item);
+          registerFoundEmail(item);
+        }
+      }
+    }
+  } catch (tabErr) {
+    console.debug("Active tab live DOM harvest skipped:", tabErr);
+  }
+
   chrome.runtime.sendMessage(
     {
       type: "START_CRAWL",
@@ -421,7 +459,9 @@ startBtn.addEventListener("click", async () => {
       checkPdfs: checkPdfsCheckbox.checked,
       ocrImages: !!(ocrImagesCheckbox && ocrImagesCheckbox.checked),
       filterCompliance: filterComplianceCheckbox ? filterComplianceCheckbox.checked : true,
-      includeSubdomains: includeSubdomainsCheckbox.checked
+      includeSubdomains: includeSubdomainsCheckbox.checked,
+      initialFindings,
+      initialLinks
     },
     (response) => {
       if (chrome.runtime.lastError) {

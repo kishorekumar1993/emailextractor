@@ -431,6 +431,154 @@ function cleanAndNormalizeUrl(rawUrl, baseUrl) {
   }
 }
 
+function isPdfUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  const u = url.trim().toLowerCase();
+  return (
+    /\.pdf(?:[?#]|$)/i.test(u) ||
+    /(?:[?&](?:file|doc|format|type|download|attachment|filepath)=[^&]*\.pdf)/i.test(u) ||
+    /(?:download_file\.asp|download\.php|getfile\.aspx|download\.aspx)\?[^"'\s>]*fid=/i.test(u)
+  );
+}
+
+function findByteSequence(buf, seq, start = 0) {
+  for (let i = start; i <= buf.length - seq.length; i++) {
+    let match = true;
+    for (let j = 0; j < seq.length; j++) {
+      if (buf[i + j] !== seq[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return i;
+  }
+  return -1;
+}
+
+function safeDecompress(chunk, format = "deflate") {
+  return new Promise((resolve) => {
+    try {
+      const ds = new DecompressionStream(format);
+      const writer = ds.writable.getWriter();
+      const reader = ds.readable.getReader();
+      const chunks = [];
+
+      reader.read().then(function processChunk({ done, value }) {
+        if (done) {
+          const totalLen = chunks.reduce((acc, c) => acc + c.length, 0);
+          const merged = new Uint8Array(totalLen);
+          let offset = 0;
+          for (const c of chunks) {
+            merged.set(c, offset);
+            offset += c.length;
+          }
+          return resolve(new TextDecoder("latin1").decode(merged));
+        }
+        chunks.push(value);
+        return reader.read().then(processChunk);
+      }).catch(() => resolve(""));
+
+      writer.write(chunk).catch(() => {});
+      writer.close().catch(() => {});
+    } catch {
+      resolve("");
+    }
+  });
+}
+
+async function decompressPdfChunk(chunk) {
+  if (!chunk || chunk.length < 4) return "";
+  let res = await safeDecompress(chunk, "deflate");
+  if (res) return res;
+  res = await safeDecompress(chunk, "deflate-raw");
+  if (res) return res;
+  return "";
+}
+
+function extractTextFromPdfStream(rawStreamText) {
+  if (!rawStreamText) return "";
+  const results = [];
+
+  // 1. (Text) Tj, ', "
+  const tjRegex = /\(([^)]+)\)\s*(?:Tj|'|")/gi;
+  let m;
+  while ((m = tjRegex.exec(rawStreamText)) !== null) {
+    results.push(m[1]);
+  }
+
+  // 2. [(T) 10 (e) 10 (x) 10 (t)] TJ arrays
+  const arrayTjRegex = /\[([^\]]+)\]\s*TJ/gi;
+  while ((m = arrayTjRegex.exec(rawStreamText)) !== null) {
+    const inner = m[1];
+    const chunkMatches = inner.match(/\(([^)]*)\)/g);
+    if (chunkMatches) {
+      const combined = chunkMatches.map((c) => c.slice(1, -1)).join("");
+      results.push(combined);
+    }
+  }
+
+  // 3. Hex strings: <696e666f40646f6d61696e2e636f6d> Tj
+  const hexTjRegex = /<([0-9a-fA-F]{8,})>\s*Tj/gi;
+  while ((m = hexTjRegex.exec(rawStreamText)) !== null) {
+    try {
+      const hex = m[1];
+      let str = "";
+      for (let i = 0; i < hex.length; i += 2) {
+        str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+      }
+      if (str.includes("@")) results.push(str);
+    } catch {}
+  }
+
+  return results.join(" ") + " " + rawStreamText;
+}
+
+async function extractDeepPdfText(uint8) {
+  const STREAM_SEQ = [115, 116, 114, 101, 97, 109]; // "stream"
+  const ENDSTREAM_SEQ = [101, 110, 100, 115, 116, 114, 101, 97, 109]; // "endstream"
+
+  let combinedText = "";
+
+  // 1. Scan uncompressed text / metadata first
+  const maxDirectBytes = Math.min(uint8.length, 2 * 1024 * 1024);
+  const rawAscii = new TextDecoder("latin1").decode(uint8.subarray(0, maxDirectBytes));
+  combinedText += extractTextFromPdfStream(rawAscii);
+
+  // 2. Scan and decompress all FlateDecode streams
+  let pos = 0;
+  let streamCount = 0;
+  const maxStreams = 100;
+
+  while (pos < uint8.length && streamCount < maxStreams) {
+    const streamIdx = findByteSequence(uint8, STREAM_SEQ, pos);
+    if (streamIdx === -1) break;
+
+    let dataStart = streamIdx + 6;
+    if (uint8[dataStart] === 13) dataStart++;
+    if (uint8[dataStart] === 10) dataStart++;
+
+    const endIdx = findByteSequence(uint8, ENDSTREAM_SEQ, dataStart);
+    if (endIdx === -1) break;
+
+    let dataEnd = endIdx;
+    if (dataEnd > dataStart && uint8[dataEnd - 1] === 10) dataEnd--;
+    if (dataEnd > dataStart && uint8[dataEnd - 1] === 13) dataEnd--;
+
+    if (dataEnd > dataStart && (dataEnd - dataStart) < 3 * 1024 * 1024) {
+      const streamChunk = uint8.subarray(dataStart, dataEnd);
+      streamCount++;
+      const decompressed = await decompressPdfChunk(streamChunk);
+      if (decompressed) {
+        combinedText += " " + extractTextFromPdfStream(decompressed);
+      }
+    }
+
+    pos = endIdx + 9;
+  }
+
+  return combinedText;
+}
+
 function extractAllLinksAndMedia(html) {
   const rawLinks = [];
   const directPdfCandidates = new Set();
@@ -449,7 +597,7 @@ function extractAllLinksAndMedia(html) {
       const trimmed = href.trim();
       if (trimmed && !trimmed.startsWith("javascript:") && !trimmed.startsWith("#")) {
         rawLinks.push(trimmed);
-        if (/\.pdf\b/i.test(innerText) || /\.pdf(\?|$)/i.test(trimmed)) {
+        if (isPdfUrl(trimmed) || /\.pdf\b/i.test(innerText) || /(?:download\s+(?:catalog|brochure|spec|pdf|document)|pdf\s+download|e-catalog|datasheet)/i.test(innerText)) {
           directPdfCandidates.add(trimmed);
         }
         // Detect download script endpoints that serve documents/catalogs
@@ -905,7 +1053,7 @@ async function runProductionCrawl(crawlState) {
     }
   }
 
-  const HIGH_VALUE_PDF_REGEX = /(?:catalog|katalog|brochure|prospekt|flyer|profile|company|about|contact|overview|presentation|cert|spec|product-list)/i;
+  const HIGH_VALUE_PDF_REGEX = /(?:catalog|katalog|brochure|prospekt|flyer|profile|company|about|contact|overview|presentation|cert|spec|product-list|datasheet|manual)/i;
 
   function enqueuePdf(rawPdfUrl, sourcePage) {
     if (!checkPdfs) return;
@@ -913,11 +1061,12 @@ async function runProductionCrawl(crawlState) {
     if (!pdfUrl) return;
     if (visitedPdfs.has(pdfUrl) || enqueuedPdfUrls.has(pdfUrl)) return;
 
-    const isHighValue = HIGH_VALUE_PDF_REGEX.test(pdfUrl);
-    // Cap low-value part drawings to max 25, while keeping high-value catalogs & brochures prioritized
-    if (enqueuedPdfUrls.size >= 25 && !isHighValue) return;
+    // Scale PDF limit generously with maxPages (up to 300 PDFs, minimum 100)
+    const maxPdfLimit = Math.min(300, Math.max(100, maxPages || 100));
+    if (enqueuedPdfUrls.size >= maxPdfLimit) return;
 
     enqueuedPdfUrls.add(pdfUrl);
+    const isHighValue = HIGH_VALUE_PDF_REGEX.test(pdfUrl);
     const item = { url: pdfUrl, sourcePage: sourcePage || startUrl };
     if (isHighValue) {
       pdfQueue.unshift(item);
@@ -948,11 +1097,13 @@ async function runProductionCrawl(crawlState) {
     for (const rawL of initialLinks) {
       if (crawlState.aborted) break;
       const cUrl = cleanAndNormalizeUrl(rawL, startUrl);
-      if (cUrl && isUrlInScope(cUrl, baseOrigin, baseHostname, includeSubdomains)) {
-        if (cUrl.toLowerCase().endsWith(".pdf")) {
-          if (checkPdfs) enqueuePdf(cUrl, startUrl);
-          continue;
-        }
+      if (!cUrl) continue;
+      // Allow PDF documents even if hosted on CDN / S3 storage
+      if (isPdfUrl(cUrl)) {
+        if (checkPdfs) enqueuePdf(cUrl, startUrl);
+        continue;
+      }
+      if (isUrlInScope(cUrl, baseOrigin, baseHostname, includeSubdomains)) {
         if (!enqueuedHtmlUrls.has(cUrl) && htmlQueue.length + visitedUrls.size < maxPages) {
           enqueuedHtmlUrls.add(cUrl);
           if (HIGH_PRIORITY_REGEX.test(cUrl)) {
@@ -991,7 +1142,12 @@ async function runProductionCrawl(crawlState) {
       for (const smUrl of sitemapUrls) {
         if (crawlState.aborted) break;
         const cUrl = cleanAndNormalizeUrl(smUrl, startUrl);
-        if (cUrl && isUrlInScope(cUrl, baseOrigin, baseHostname, includeSubdomains)) {
+        if (!cUrl) continue;
+        if (isPdfUrl(cUrl)) {
+          if (checkPdfs) enqueuePdf(cUrl, startUrl);
+          continue;
+        }
+        if (isUrlInScope(cUrl, baseOrigin, baseHostname, includeSubdomains)) {
           if (cUrl.toLowerCase().endsWith(".pdf")) {
             if (checkPdfs) enqueuePdf(cUrl, startUrl);
             continue;
@@ -1055,16 +1211,17 @@ async function runProductionCrawl(crawlState) {
         const buffer = await res.arrayBuffer();
         if (buffer.byteLength < 50 || buffer.byteLength > 25 * 1024 * 1024) return;
 
-        // In-Memory scan: extracts digital emails from raw PDF streams in < 5ms using native TextDecoder
+        // Deep In-Memory PDF scan: scans uncompressed text + decompresses all FlateDecode streams in memory
         let extractedPdfEmails = [];
         try {
           const uint8 = new Uint8Array(buffer);
-          const maxScanBytes = Math.min(uint8.length, 2 * 1024 * 1024); // 2 MB is plenty for PDF text/metadata
-          const binaryStr = new TextDecoder("latin1").decode(uint8.subarray(0, maxScanBytes));
-          if (binaryStr.includes("@")) {
-            extractedPdfEmails = normalizeAndExtractEmails(binaryStr);
+          const deepText = await extractDeepPdfText(uint8);
+          if (deepText && deepText.includes("@")) {
+            extractedPdfEmails = normalizeAndExtractEmails(deepText);
           }
-        } catch {}
+        } catch (pdfErr) {
+          console.debug("PDF stream extraction error:", pdfErr);
+        }
 
         for (const em of extractedPdfEmails) {
           recordCleanEmail(em, currentUrl, "pdf", mainSitePage, { pdf: currentUrl, sourceType: "pdf" });
@@ -1108,7 +1265,7 @@ async function runProductionCrawl(crawlState) {
         }
 
         const contentType = (res.headers.get("content-type") || "").toLowerCase();
-        if (contentType.includes("application/pdf") || currentUrl.toLowerCase().endsWith(".pdf") || finalUrl.toLowerCase().endsWith(".pdf")) {
+        if (contentType.includes("application/pdf") || isPdfUrl(currentUrl) || isPdfUrl(finalUrl)) {
           enqueuePdf(finalUrl, currentUrl);
           return;
         }
@@ -1221,7 +1378,7 @@ async function runProductionCrawl(crawlState) {
         if (!cleanUrl) continue;
 
         // Check if link points to a PDF file or document download
-        if (directPdfCandidates.has(rawLink) || cleanUrl.toLowerCase().endsWith(".pdf")) {
+        if (directPdfCandidates.has(rawLink) || isPdfUrl(cleanUrl) || isPdfUrl(rawLink)) {
           enqueuePdf(cleanUrl, finalUrl);
           continue;
         }
