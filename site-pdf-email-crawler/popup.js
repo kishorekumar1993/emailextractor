@@ -5,6 +5,7 @@
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const exportBtn = document.getElementById("exportBtn");
+const exportJsonBtn = document.getElementById("exportJsonBtn");
 const copyBtn = document.getElementById("copyBtn");
 const copyPathBtn = document.getElementById("copyPathBtn");
 const statusText = document.getElementById("statusText");
@@ -46,6 +47,7 @@ function escapeHtml(str) {
 function updateActionButtons() {
   const hasData = currentFindings.length > 0;
   exportBtn.disabled = !hasData;
+  if (exportJsonBtn) exportJsonBtn.disabled = !hasData;
   copyBtn.disabled = !hasData;
   copyPathBtn.disabled = !hasData;
   if (hasData) {
@@ -54,23 +56,25 @@ function updateActionButtons() {
 }
 
 function appendEmailRow(finding) {
-  const normEmail = finding.email.toLowerCase();
+  const normEmail = (finding.copy || finding.email).toLowerCase();
   const existingTr = emailRowsMap.get(normEmail);
 
   let typeBadgeClass = "type-html";
   const st = (finding.sourceType || "").toLowerCase();
   if (st.includes("pdf")) {
     typeBadgeClass = "type-pdf";
+  } else if (st.includes("image")) {
+    typeBadgeClass = "type-image";
   } else if (st.includes("mailto")) {
     typeBadgeClass = "type-mailto";
   }
 
   const occurrences = finding.occurrences || (finding.sources ? finding.sources.length : 1);
-  const displayUrl = finding.sourceUrl || finding.mainPageUrl || "";
+  const displayUrl = finding.url || finding.sourceUrl || finding.mainPageUrl || "";
 
   const rowHtml = `
-    <td><strong>${escapeHtml(finding.email)}</strong></td>
-    <td><span class="type-badge ${typeBadgeClass}">${escapeHtml(finding.sourceType || "HTML")}</span></td>
+    <td><strong>${escapeHtml(normEmail)}</strong></td>
+    <td><span class="type-badge ${typeBadgeClass}">${escapeHtml((finding.sourceType || "HTML").toUpperCase())}</span></td>
     <td><a class="source-link" href="${escapeHtml(displayUrl)}" target="_blank" title="${escapeHtml(displayUrl)}">${escapeHtml(displayUrl)}</a></td>
     <td style="text-align: center;"><strong>${occurrences}</strong></td>
   `;
@@ -264,6 +268,7 @@ startBtn.addEventListener("click", async () => {
   searchInput.value = "";
   searchInput.style.display = "none";
   exportBtn.disabled = true;
+  if (exportJsonBtn) exportJsonBtn.disabled = true;
   copyBtn.disabled = true;
   copyPathBtn.disabled = true;
 
@@ -407,6 +412,37 @@ exportBtn.addEventListener("click", () => {
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 });
+
+// ── Export JSON ──────────────────────────────────────────────────────
+if (exportJsonBtn) {
+  exportJsonBtn.addEventListener("click", () => {
+    if (currentFindings.length === 0) return;
+
+    const exportData = {
+      emails: currentFindings.map((f) => ({
+        copy: (f.copy || f.email || "").toLowerCase().trim(),
+        url: f.url || f.mainPageUrl || f.sourceUrl || null,
+        pdf: f.pdf || null,
+        image: f.image || null,
+        sourceType: (f.sourceType || (f.pdf ? "pdf" : (f.image ? "image" : "html"))).toLowerCase()
+      }))
+    };
+
+    const jsonStr = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([jsonStr], { type: "application/json;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const domain = targetUrlInput && targetUrlInput.value
+      ? targetUrlInput.value.replace(/^https?:\/\//i, "").split("/")[0].replace(/[^a-zA-Z0-9.-]/g, "_")
+      : "site";
+    a.download = `extracted_emails_${domain}_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+}
 
 // ── Window Mode & Tab Detection Setup ────────────────────────────────
 async function openPersistentWindow() {

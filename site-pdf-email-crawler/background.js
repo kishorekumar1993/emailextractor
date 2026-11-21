@@ -61,8 +61,8 @@ const SKIP_EXT_REGEX = /\.(css|js|jsx|ts|tsx|map|json|xml|rss|atom|woff|woff2|tt
 // Paths to ignore
 const IGNORE_PATH_REGEX = /\/(?:wp-includes|wp-json|xmlrpc\.php|cdn-cgi|cgi-bin|node_modules|\.well-known)\//i;
 
-// High priority contact/about pages
-const HIGH_PRIORITY_REGEX = /(?:contact|about|enquiry|inquiry|reach-us|get-in-touch|support|feedback|connect|team|staff|office|location|imprint|impressum)/i;
+// High priority contact, catalog, download, and about pages across all languages
+const HIGH_PRIORITY_REGEX = /(?:contact|about|enquiry|inquiry|reach-us|get-in-touch|support|feedback|connect|team|staff|office|location|imprint|impressum|profile|catalog|catalogue|katalog|download|brochure|cert|spec|company|聯絡|關於|簡介|型錄|下載)/i;
 
 // ═══════════════════════════════════════════════════════════════════════
 // 1. STRICT EMAIL VALIDATION & DE-OBFUSCATION PIPELINE
@@ -226,6 +226,29 @@ function normalizeAndExtractEmails(rawText) {
     (_, localPart, domainPart) => `${localPart.replace(/\s+/g, "")}@${domainPart.replace(/\s+/g, "")}`
   );
 
+  // 8.5. Extract from raw HTML attributes: value="", content="", data-*, action="", placeholder="", alt="", title=""
+  const attrRegex = /\b(?:value|content|data-[a-z0-9_-]+|action|placeholder|alt|title)=["']([^"']+)["']/gi;
+  let attrMatch;
+  while ((attrMatch = attrRegex.exec(rawText)) !== null) {
+    const val = attrMatch[1];
+    if (val && val.includes("@")) {
+      for (const p of val.split(/[\s,;]+/)) {
+        checkAndAdd(p.replace(/^mailto:/i, "").trim());
+      }
+    }
+  }
+
+  // 8.6. Extract from SVG text elements (<text>, <tspan>, <desc>, <title>)
+  const svgTextRegex = /<(?:text|tspan|desc|title)\b[^>]*>([\s\S]*?)<\/(?:text|tspan|desc|title)>/gi;
+  let svgMatch;
+  while ((svgMatch = svgTextRegex.exec(rawText)) !== null) {
+    const val = svgMatch[1];
+    if (val && val.includes("@")) {
+      const svgEmails = val.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24}/g) || [];
+      for (const em of svgEmails) checkAndAdd(em);
+    }
+  }
+
   // 9. Standard email extraction from cleaned text
   const cleanText = deobfuscated
     .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
@@ -238,11 +261,24 @@ function normalizeAndExtractEmails(rawText) {
     checkAndAdd(m);
   }
 
-  // 10. Extract directly from mailto links
-  const mailtoRegex = /href=["']mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})[^"']*["']/gi;
-  let mtMatch;
-  while ((mtMatch = mailtoRegex.exec(rawText)) !== null) {
-    checkAndAdd(mtMatch[1]);
+  // 10. Extract directly from all mailto links (handles cc, bcc, multi-recipient lists)
+  const mailtoFullRegex = /\bmailto:([^\s"'<>]+)/gi;
+  let mfMatch;
+  while ((mfMatch = mailtoFullRegex.exec(rawText)) !== null) {
+    try {
+      const decodedMailto = decodeURIComponent(mfMatch[1]);
+      for (const p of decodedMailto.split(/[\s,;?&=]+/)) {
+        if (p.includes("@")) {
+          checkAndAdd(p.replace(/^(?:to|cc|bcc):/i, "").trim());
+        }
+      }
+    } catch {
+      for (const p of mfMatch[1].split(/[\s,;?&=]+/)) {
+        if (p.includes("@")) {
+          checkAndAdd(p.replace(/^(?:to|cc|bcc):/i, "").trim());
+        }
+      }
+    }
   }
 
   return Array.from(found);
@@ -270,6 +306,17 @@ function isUrlInScope(candidateUrl, baseOrigin, baseHostname, includeSubdomains 
 
     if (includeSubdomains) {
       if (cHost.endsWith("." + bHost)) return true;
+    }
+
+    // Official supplier storefront subdomains matching company SLD (e.g. soongiant.en.taiwantrade.com)
+    const bSld = bHost.split(".")[0];
+    if (bSld && bSld.length >= 4) {
+      if (
+        cHost.startsWith(`${bSld}.`) &&
+        (cHost.includes("taiwantrade.com") || cHost.includes("alibaba.com") || cHost.includes("globalsources.com"))
+      ) {
+        return true;
+      }
     }
 
     return false;
@@ -300,11 +347,13 @@ function cleanAndNormalizeUrl(rawUrl, baseUrl) {
   }
 }
 
-function extractAllLinksAndText(html) {
+function extractAllLinksAndMedia(html) {
   const rawLinks = [];
   const directPdfCandidates = new Set();
+  const imageCandidates = [];
+  const videoLinks = [];
 
-  // 1. Regular <a> links
+  // 1. Regular <a> links & data-href / data-url
   const aRegex = /<a\b([^>]*)>(?:([\s\S]*?)<\/a>)?/gi;
   let aMatch;
   while ((aMatch = aRegex.exec(html)) !== null) {
@@ -319,33 +368,62 @@ function extractAllLinksAndText(html) {
         if (/\.pdf\b/i.test(innerText) || /\.pdf(\?|$)/i.test(trimmed)) {
           directPdfCandidates.add(trimmed);
         }
-      }
-    }
-  }
-
-  // 2. Embedded elements: iframe, embed, object, link
-  const embRegex = /<(?:iframe|embed|object|link)\b[^>]*(?:\bsrc|\bdata|\bhref)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>/gi;
-  let embMatch;
-  while ((embMatch = embRegex.exec(html)) !== null) {
-    const src = embMatch[1] || embMatch[2] || embMatch[3] || "";
-    if (src) {
-      const trimmed = src.trim();
-      if (trimmed && !trimmed.startsWith("javascript:") && !trimmed.startsWith("#")) {
-        rawLinks.push(trimmed);
-        if (/\.pdf(\?|$)/i.test(trimmed)) {
+        // Detect download script endpoints that serve documents/catalogs
+        if (/(?:download_file\.asp|download\.php|getfile\.aspx|download\.aspx)\?[^"'\s>]*fid=/i.test(trimmed)) {
           directPdfCandidates.add(trimmed);
+        }
+        // Detect video / animation links
+        if (/(?:youtube\.com\/watch|youtu\.be\/|vimeo\.com\/|youku\.com\/|bilibili\.com\/)/i.test(trimmed)) {
+          videoLinks.push(trimmed);
         }
       }
     }
   }
 
-  // 3. Schema.org JSON-LD structured data
+  // 2. Embedded media: iframe, embed, object, video, source, track
+  const embRegex = /<(?:iframe|embed|object|video|source|track|link)\b([^>]*)>/gi;
+  let embMatch;
+  while ((embMatch = embRegex.exec(html)) !== null) {
+    const attrs = embMatch[1] || "";
+    const srcMatch = attrs.match(/\b(?:src|data|href|poster|data-src|data-video)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    const src = srcMatch ? srcMatch[1] || srcMatch[2] || srcMatch[3] : "";
+    if (src) {
+      const trimmed = src.trim();
+      if (trimmed && !trimmed.startsWith("javascript:") && !trimmed.startsWith("#") && !trimmed.startsWith("data:")) {
+        rawLinks.push(trimmed);
+        if (/\.pdf(\?|$)/i.test(trimmed)) {
+          directPdfCandidates.add(trimmed);
+        }
+        if (/(?:youtube\.com|youtu\.be|vimeo\.com|youku\.com|\.mp4|\.webm|\.m4v)/i.test(trimmed)) {
+          videoLinks.push(trimmed);
+        }
+      }
+    }
+  }
+
+  // 3. Images: img tags, picture sources, data-src (extract alt, title, and image URLs)
+  const imgRegex = /<img\b([^>]*)>/gi;
+  let imgMatch;
+  while ((imgMatch = imgRegex.exec(html)) !== null) {
+    const attrs = imgMatch[1] || "";
+    const srcMatch = attrs.match(/\b(?:src|data-src|data-original|data-lazy-src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    const altMatch = attrs.match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    const titleMatch = attrs.match(/\btitle\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    const imgSrc = srcMatch ? srcMatch[1] || srcMatch[2] || srcMatch[3] : "";
+    const alt = altMatch ? altMatch[1] || altMatch[2] || altMatch[3] || "" : "";
+    const title = titleMatch ? titleMatch[1] || titleMatch[2] || titleMatch[3] || "" : "";
+    if (imgSrc && !imgSrc.startsWith("data:")) {
+      imageCandidates.push({ url: imgSrc.trim(), alt, title });
+    }
+  }
+
+  // 4. Schema.org JSON-LD structured data
   const jsonLdRegex = /<script\b[^>]*\btype=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   let jMatch;
   while ((jMatch = jsonLdRegex.exec(html)) !== null) {
     const rawJson = jMatch[1];
     if (rawJson) {
-      const urlMatches = rawJson.match(/"(?:url|sameAs)":\s*(?:"([^"]+)"|\[([^\]]+)\])/gi);
+      const urlMatches = rawJson.match(/"(?:url|sameAs|contentUrl|embedUrl)":\s*(?:"([^"]+)"|\[([^\]]+)\])/gi);
       if (urlMatches) {
         for (const um of urlMatches) {
           const links = um.match(/https?:\/\/[^\s"',]+/gi);
@@ -360,7 +438,7 @@ function extractAllLinksAndText(html) {
     .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ");
 
   const text = cleanHtml.replace(/<[^>]+>/g, " ");
-  return { text, rawLinks, directPdfCandidates };
+  return { text, rawLinks, directPdfCandidates, imageCandidates, videoLinks };
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -384,6 +462,8 @@ async function probeSitemaps(baseOrigin, abortSignal) {
   }
 
   const seen = new Set();
+  const subSitemapXmlUrls = new Set();
+
   const promises = baseEndpoints.map(async (endpoint) => {
     try {
       if (abortSignal && abortSignal.aborted) return;
@@ -399,36 +479,30 @@ async function probeSitemaps(baseOrigin, abortSignal) {
       if (endpoint.endsWith("robots.txt")) {
         const smMatches = text.match(/^\s*Sitemap:\s*(https?:\/\/[^\s]+)/gim);
         if (smMatches) {
-          for (const sm of smMatches.slice(0, 3)) {
+          for (const sm of smMatches.slice(0, 5)) {
             const smUrl = sm.replace(/^\s*Sitemap:\s*/i, "").trim();
             if (smUrl && !seen.has(smUrl)) {
               seen.add(smUrl);
-              discovered.push(smUrl);
+              if (smUrl.toLowerCase().endsWith(".xml") || smUrl.includes("sitemap")) {
+                subSitemapXmlUrls.add(smUrl);
+              } else {
+                discovered.push(smUrl);
+              }
             }
           }
         }
         return;
       }
 
-      // Check for sitemap index or standard urls
-      const subSitemaps = text.match(/<sitemap>[\s\S]*?<loc>([^<]+)<\/loc>[\s\S]*?<\/sitemap>/gi);
-      if (subSitemaps && subSitemaps.length > 0) {
-        for (const s of subSitemaps.slice(0, 3)) {
-          const locMatch = s.match(/<loc>([^<]+)<\/loc>/i);
-          if (locMatch && locMatch[1]) {
-            const u = locMatch[1].trim();
-            if (!seen.has(u)) {
-              seen.add(u);
-              discovered.push(u);
-            }
-          }
-        }
-      } else {
-        const locs = text.match(/<loc>([^<]+)<\/loc>/gi) || [];
-        for (const l of locs.slice(0, 300)) {
-          const u = l.replace(/<\/?loc>/gi, "").trim();
-          if (u && !seen.has(u)) {
-            seen.add(u);
+      // Check all <loc> entries in sitemap index or standard sitemap
+      const locs = text.match(/<loc>([^<]+)<\/loc>/gi) || [];
+      for (const l of locs) {
+        const u = l.replace(/<\/?loc>/gi, "").trim();
+        if (u && !seen.has(u)) {
+          seen.add(u);
+          if (u.toLowerCase().endsWith(".xml") || u.includes("sitemap")) {
+            subSitemapXmlUrls.add(u);
+          } else {
             discovered.push(u);
           }
         }
@@ -437,6 +511,33 @@ async function probeSitemaps(baseOrigin, abortSignal) {
   });
 
   await Promise.allSettled(promises);
+
+  // Recursively fetch sub-sitemaps (e.g. sitemapen_site.xml, sitemap_products.xml)
+  if (subSitemapXmlUrls.size > 0 && !abortSignal?.aborted) {
+    const subList = Array.from(subSitemapXmlUrls).slice(0, 8);
+    const subPromises = subList.map(async (subUrl) => {
+      try {
+        if (abortSignal && abortSignal.aborted) return;
+        const res = await fetch(subUrl, {
+          credentials: "omit",
+          headers: { "Accept": "text/xml,application/xml,*/*" },
+          signal: getSignal(1500)
+        });
+        if (!res.ok) return;
+        const xml = await res.text();
+        const subLocs = xml.match(/<loc>([^<]+)<\/loc>/gi) || [];
+        for (const l of subLocs.slice(0, 300)) {
+          const u = l.replace(/<\/?loc>/gi, "").trim();
+          if (u && !seen.has(u) && !u.toLowerCase().endsWith(".xml")) {
+            seen.add(u);
+            discovered.push(u);
+          }
+        }
+      } catch {}
+    });
+    await Promise.allSettled(subPromises);
+  }
+
   return discovered;
 }
 
@@ -454,20 +555,47 @@ function generateSisterDomains(domain) {
   const candidates = new Set();
 
   if (tld === "com") {
-    candidates.add(`${sld}.in`);
-    candidates.add(`${sld}.co.in`);
+    candidates.add(`${sld}.net`);
     candidates.add(`${sld}.co.uk`);
     candidates.add(`${sld}.de`);
+    candidates.add(`${sld}.com.tw`);
+    candidates.add(`${sld}.tw`);
+    candidates.add(`${sld}.in`);
+    candidates.add(`${sld}.co.in`);
+    candidates.add(`${sld}.com.au`);
+    candidates.add(`${sld}.com.cn`);
+    candidates.add(`${sld}.eu`);
+  } else if (tld === "com.tw" || tld === "tw") {
+    candidates.add(`${sld}.com`);
+    candidates.add(`${sld}.net`);
+    candidates.add(`${sld}.tw`);
+    candidates.add(`${sld}.com.tw`);
+    candidates.add(`${sld}.com.cn`);
+  } else if (tld === "com.cn" || tld === "cn") {
+    candidates.add(`${sld}.com`);
+    candidates.add(`${sld}.net`);
+    candidates.add(`${sld}.com.cn`);
   } else if (tld === "in" || tld === "co.in") {
     candidates.add(`${sld}.com`);
-  } else if (tld === "co.uk") {
+    candidates.add(`${sld}.net`);
+    candidates.add(`${sld}.in`);
+  } else if (tld === "co.uk" || tld === "uk") {
     candidates.add(`${sld}.com`);
-  } else if (tld === "de") {
+    candidates.add(`${sld}.co.uk`);
+    candidates.add(`${sld}.eu`);
+  } else if (tld === "de" || tld === "fr" || tld === "it" || tld === "es" || tld === "ch") {
     candidates.add(`${sld}.com`);
+    candidates.add(`${sld}.eu`);
+  } else if (tld === "com.au" || tld === "au") {
+    candidates.add(`${sld}.com`);
+    candidates.add(`${sld}.com.au`);
+  } else {
+    candidates.add(`${sld}.com`);
+    candidates.add(`${sld}.net`);
   }
 
   candidates.delete(norm);
-  return Array.from(candidates).slice(0, 4);
+  return Array.from(candidates).slice(0, 6);
 }
 
 async function discoverSisterDomainEmails(startUrl, companyKeywords) {
@@ -569,14 +697,22 @@ async function runProductionCrawl(crawlState) {
   crawlState.visitedUrls = visitedUrls;
   crawlState.visitedPdfs = visitedPdfs;
 
-  function recordCleanEmail(email, sourceUrl, sourceType, mainPageUrl) {
+  function recordCleanEmail(email, sourceUrl, sourceType, mainPageUrl, extraMeta = {}) {
     if (!email || !isValidEmail(email)) return;
-    const existing = findingsMap.get(email);
+    const cleanEmail = email.trim().toLowerCase();
+    const existing = findingsMap.get(cleanEmail);
     const nowStr = new Date().toISOString();
+
+    const pdfUrl = extraMeta.pdf || (sourceType.toLowerCase().includes("pdf") ? sourceUrl : null);
+    const imageUrl = extraMeta.image || (sourceType.toLowerCase().includes("image") ? sourceUrl : null);
+    const actualSourceType = extraMeta.sourceType || (pdfUrl ? "pdf" : (imageUrl ? "image" : "html"));
+
     const sourceEntry = {
-      sourceType: sourceType || "HTML",
+      sourceType: actualSourceType,
       sourceUrl: sourceUrl || startUrl,
       mainPageUrl: mainPageUrl || sourceUrl || startUrl,
+      pdf: pdfUrl,
+      image: imageUrl,
       timestamp: nowStr
     };
 
@@ -587,18 +723,24 @@ async function runProductionCrawl(crawlState) {
       if (!alreadyHasSource) {
         existing.sources.push(sourceEntry);
         existing.occurrences = existing.sources.length;
+        if (!existing.pdf && pdfUrl) existing.pdf = pdfUrl;
+        if (!existing.image && imageUrl) existing.image = imageUrl;
         emitEmailFound(existing);
       }
     } else {
       const item = {
-        email,
-        sourceType: sourceType || "HTML",
+        copy: cleanEmail,
+        url: mainPageUrl || sourceUrl || startUrl,
+        pdf: pdfUrl,
+        image: imageUrl,
+        sourceType: actualSourceType,
+        email: cleanEmail,
         sourceUrl: sourceUrl || startUrl,
         mainPageUrl: mainPageUrl || sourceUrl || startUrl,
         occurrences: 1,
         sources: [sourceEntry]
       };
-      findingsMap.set(email, item);
+      findingsMap.set(cleanEmail, item);
       findings.push(item);
       emitEmailFound(item);
     }
@@ -673,44 +815,42 @@ async function runProductionCrawl(crawlState) {
     }
   } catch {}
 
-  // Deep URL Navigation Seeding: root (/), language paths (/en/), contact & about pages
+  // Deep URL Navigation Seeding: root (/), multi-language paths (/en/, /zh-tw/), contact, catalog, & about pages
   try {
     const rawPath = startObj.pathname;
-    if (rawPath && rawPath !== "/" && rawPath !== "") {
-      const rootUrl = cleanAndNormalizeUrl(baseOrigin + "/", startUrl);
-      if (rootUrl && !enqueuedHtmlUrls.has(rootUrl)) {
-        enqueuedHtmlUrls.add(rootUrl);
-        htmlQueue.push(rootUrl);
+    const rootUrl = cleanAndNormalizeUrl(baseOrigin + "/", startUrl);
+    if (rootUrl && !enqueuedHtmlUrls.has(rootUrl)) {
+      enqueuedHtmlUrls.add(rootUrl);
+      htmlQueue.push(rootUrl);
+    }
+
+    const standardContactPaths = [
+      "contact.html", "contact-us.html", "contact_us.html", "contactus.html",
+      "contacts.html", "about.html", "about-us.html", "about_us.html", "aboutus.html",
+      "company-profile.html", "contact", "contact-us", "about", "about-us",
+      "inquiry-cart.html", "inquiry.html", "e-catalog.html", "catalog.html",
+      "download.html", "downloads.html", "a1/Company-Profile.html", "news.html"
+    ];
+
+    const topLanguagePrefixes = ["/", "/en/", "/zh-tw/", "/zh-cn/", "/es/", "/de/", "/fr/", "/ja/"];
+
+    for (const prefix of topLanguagePrefixes) {
+      if (htmlQueue.length + visitedUrls.size >= maxPages) break;
+      const lUrl = cleanAndNormalizeUrl(`${baseOrigin}${prefix}`, startUrl);
+      if (lUrl && !enqueuedHtmlUrls.has(lUrl)) {
+        enqueuedHtmlUrls.add(lUrl);
+        htmlQueue.push(lUrl);
       }
-
-      const langMatch = rawPath.match(/^\/([a-zA-Z]{2}(?:-[a-zA-Z]{2})?)(?:\/|$)/);
-      const langPrefix = langMatch ? `/${langMatch[1]}/` : "/";
-      if (langPrefix !== "/") {
-        const langUrl = cleanAndNormalizeUrl(baseOrigin + langPrefix, startUrl);
-        if (langUrl && !enqueuedHtmlUrls.has(langUrl)) {
-          enqueuedHtmlUrls.add(langUrl);
-          htmlQueue.push(langUrl);
-        }
-      }
-
-      const standardContactPaths = [
-        "contact.html", "contact-us.html", "contact_us.html", "contactus.html",
-        "contacts.html", "about.html", "about-us.html", "about_us.html", "aboutus.html",
-        "contact", "contact-us", "about", "about-us"
-      ];
-
       for (const p of standardContactPaths) {
-        if (langPrefix !== "/") {
-          const lUrl = cleanAndNormalizeUrl(`${baseOrigin}${langPrefix}${p}`, startUrl);
-          if (lUrl && !enqueuedHtmlUrls.has(lUrl)) {
-            enqueuedHtmlUrls.add(lUrl);
-            htmlQueue.push(lUrl);
+        if (htmlQueue.length + visitedUrls.size >= maxPages) break;
+        const cUrl = cleanAndNormalizeUrl(`${baseOrigin}${prefix}${p}`, startUrl);
+        if (cUrl && !enqueuedHtmlUrls.has(cUrl)) {
+          enqueuedHtmlUrls.add(cUrl);
+          if (HIGH_PRIORITY_REGEX.test(cUrl)) {
+            htmlQueue.unshift(cUrl);
+          } else {
+            htmlQueue.push(cUrl);
           }
-        }
-        const rUrl = cleanAndNormalizeUrl(`${baseOrigin}/${p}`, startUrl);
-        if (rUrl && !enqueuedHtmlUrls.has(rUrl)) {
-          enqueuedHtmlUrls.add(rUrl);
-          htmlQueue.push(rUrl);
         }
       }
     }
@@ -782,7 +922,7 @@ async function runProductionCrawl(crawlState) {
         } catch {}
 
         for (const em of extractedPdfEmails) {
-          recordCleanEmail(em, currentUrl, "PDF Document", mainSitePage);
+          recordCleanEmail(em, currentUrl, "pdf", mainSitePage, { pdf: currentUrl, sourceType: "pdf" });
         }
       } catch {}
     }
@@ -832,7 +972,7 @@ async function runProductionCrawl(crawlState) {
         return;
       }
 
-      const { text, rawLinks, directPdfCandidates } = extractAllLinksAndText(html);
+      const { text, rawLinks, directPdfCandidates, imageCandidates, videoLinks } = extractAllLinksAndMedia(html);
 
       // Harvest brand keywords for sister-domain discovery
       const titleMatch = html.match(/<title\b[^>]*>(.*?)<\/title>/i);
@@ -848,7 +988,21 @@ async function runProductionCrawl(crawlState) {
       const htmlMatches = normalizeAndExtractEmails(html);
       const allMatches = new Set([...textMatches, ...htmlMatches]);
       for (const m of allMatches) {
-        recordCleanEmail(m, finalUrl, "HTML", finalUrl);
+        recordCleanEmail(m, finalUrl, "html", finalUrl);
+      }
+
+      // Extract emails from image alt/title metadata
+      if (Array.isArray(imageCandidates)) {
+        for (const img of imageCandidates) {
+          const combinedImgText = `${img.alt || ""} ${img.title || ""}`;
+          if (combinedImgText.includes("@") || combinedImgText.includes("[at]")) {
+            const imgEmails = normalizeAndExtractEmails(combinedImgText);
+            for (const em of imgEmails) {
+              const fullImgUrl = cleanAndNormalizeUrl(img.url, finalUrl);
+              recordCleanEmail(em, finalUrl, "image", finalUrl, { image: fullImgUrl, sourceType: "image" });
+            }
+          }
+        }
       }
 
       // Enqueue child links & PDFs
@@ -860,7 +1014,7 @@ async function runProductionCrawl(crawlState) {
             const rawMailto = decodeURIComponent(rawLink);
             const emailsInMailto = normalizeAndExtractEmails(rawMailto);
             for (const em of emailsInMailto) {
-              recordCleanEmail(em, finalUrl, "HTML (mailto)", finalUrl);
+              recordCleanEmail(em, finalUrl, "html", finalUrl);
             }
           } catch {}
           continue;
@@ -869,7 +1023,7 @@ async function runProductionCrawl(crawlState) {
         const cleanUrl = cleanAndNormalizeUrl(rawLink, finalUrl);
         if (!cleanUrl) continue;
 
-        // Check if link points to a PDF file on any domain
+        // Check if link points to a PDF file or document download
         if (directPdfCandidates.has(rawLink) || cleanUrl.toLowerCase().endsWith(".pdf")) {
           enqueuePdf(cleanUrl, finalUrl);
           continue;
@@ -979,8 +1133,14 @@ async function runProductionCrawl(crawlState) {
 
   await Promise.all(workerPromises);
 
-  // ── Sister Domain Fallback Probe ───────────────────────────────────
-  if (findings.length === 0 && !crawlState.aborted) {
+  // ── Sister Domain Fallback & Enrichment Probe ──────────────────────
+  const hasOnlyGenericEmail = findings.length > 0 && findings.every((f) => {
+    const d = (f.email.split("@")[1] || "").toLowerCase();
+    return /^(?:gmail|yahoo|hotmail|outlook|live|aol|qq|163|126|sina)\./i.test(d);
+  });
+  const shouldEnrich = (findings.length < 3 || hasOnlyGenericEmail) && !crawlState.aborted;
+
+  if (shouldEnrich) {
     emitProgress({
       pagesCrawled: visitedUrls.size,
       pdfsCrawled: visitedPdfs.size,
@@ -995,7 +1155,9 @@ async function runProductionCrawl(crawlState) {
     );
 
     for (const item of fallbackList) {
-      recordCleanEmail(item.email, item.sourceUrl, `Sister Domain (${item.domain})`, startUrl);
+      recordCleanEmail(item.email, item.sourceUrl, "html", item.sourceUrl, {
+        sourceType: "html"
+      });
     }
   }
 
