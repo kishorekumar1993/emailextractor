@@ -300,10 +300,13 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
 }
 
 let ocrWorkerPromise = null;
+let ocrWorkerDisabled = false;
 async function getOcrWorker() {
+  if (ocrWorkerDisabled) return null;
   if (!ocrWorkerPromise) {
     ocrWorkerPromise = (async () => {
       if (typeof Tesseract === "undefined") {
+        ocrWorkerDisabled = true;
         return null;
       }
       try {
@@ -315,11 +318,12 @@ async function getOcrWorker() {
             workerBlobURL: false,
             errorHandler: () => {}
           }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("Worker spawn timeout")), 4000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Worker spawn timeout")), 3000))
         ]);
         return worker;
       } catch (err) {
         console.warn("OCR worker notice:", err);
+        ocrWorkerDisabled = true;
         ocrWorkerPromise = null;
         return null;
       }
@@ -333,6 +337,7 @@ const processedImages = new Set();
 let isProcessingImages = false;
 
 function enqueueImageOcr(task) {
+  if (ocrWorkerDisabled) return;
   if (!task || !task.imageUrl || processedImages.has(task.imageUrl)) return;
   if (!ocrImagesCheckbox || !ocrImagesCheckbox.checked) return;
   if (imageOcrQueue.length >= 3) return;
@@ -341,110 +346,112 @@ function enqueueImageOcr(task) {
 }
 
 async function processNextImageOcr() {
-  if (isProcessingImages || imageOcrQueue.length === 0) return;
+  if (isProcessingImages || imageOcrQueue.length === 0 || ocrWorkerDisabled) return;
   isProcessingImages = true;
 
-  while (imageOcrQueue.length > 0 && isCrawling) {
-    const task = imageOcrQueue.shift();
-    if (!task || processedImages.has(task.imageUrl)) continue;
-    processedImages.add(task.imageUrl);
+  try {
+    while (imageOcrQueue.length > 0 && isCrawling && !ocrWorkerDisabled) {
+      const task = imageOcrQueue.shift();
+      if (!task || processedImages.has(task.imageUrl)) continue;
+      processedImages.add(task.imageUrl);
 
-    if (statImages) statImages.textContent = processedImages.size;
-    if (ocrStatus) {
-      ocrStatus.style.display = "block";
-      ocrStatus.textContent = `🔍 OCR: Scanning image ${task.imageUrl.split("/").pop()}...`;
-    }
-
-    let objectUrl = null;
-    try {
-      const worker = await getOcrWorker();
-      if (!worker) break;
-
-      try {
-        const fetchRes = await fetch(task.imageUrl, { signal: AbortSignal.timeout(2000), credentials: "omit" });
-        if (fetchRes.ok) {
-          const blob = await fetchRes.blob();
-          objectUrl = URL.createObjectURL(blob);
-        }
-      } catch {}
-
-      const img = new Image();
-      if (objectUrl) {
-        img.src = objectUrl;
-      } else {
-        img.crossOrigin = "anonymous";
-        img.src = task.imageUrl;
+      if (statImages) statImages.textContent = processedImages.size;
+      if (ocrStatus) {
+        ocrStatus.style.display = "block";
+        ocrStatus.textContent = `🔍 OCR: Scanning image ${task.imageUrl.split("/").pop()}...`;
       }
 
-      await new Promise((resolve) => {
-        img.onload = resolve;
-        img.onerror = resolve;
-        setTimeout(resolve, 2000);
-      });
+      let objectUrl = null;
+      try {
+        const worker = await getOcrWorker();
+        if (!worker || ocrWorkerDisabled) break;
 
-      if (img.naturalWidth >= 30 && img.naturalHeight >= 15) {
-        const maxDim = 800;
-        let w = img.naturalWidth;
-        let h = img.naturalHeight;
-        if (w > maxDim || h > maxDim) {
-          if (w > h) { h = Math.round((h * maxDim) / w); w = maxDim; }
-          else { w = Math.round((w * maxDim) / h); h = maxDim; }
+        try {
+          const fetchRes = await fetch(task.imageUrl, { signal: AbortSignal.timeout(2000), credentials: "omit" });
+          if (fetchRes.ok) {
+            const blob = await fetchRes.blob();
+            objectUrl = URL.createObjectURL(blob);
+          }
+        } catch {}
+
+        const img = new Image();
+        if (objectUrl) {
+          img.src = objectUrl;
+        } else {
+          img.crossOrigin = "anonymous";
+          img.src = task.imageUrl;
         }
 
-        const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, w, h);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+        await new Promise((resolve) => {
+          img.onload = resolve;
+          img.onerror = resolve;
+          setTimeout(resolve, 1500);
+        });
 
-        const result = await Promise.race([
-          worker.recognize(dataUrl),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("OCR timeout")), 3000))
-        ]);
+        if (img.naturalWidth >= 30 && img.naturalHeight >= 15) {
+          const maxDim = 800;
+          let w = img.naturalWidth;
+          let h = img.naturalHeight;
+          if (w > maxDim || h > maxDim) {
+            if (w > h) { h = Math.round((h * maxDim) / w); w = maxDim; }
+            else { w = Math.round((w * maxDim) / h); h = maxDim; }
+          }
 
-        const ocrText = (result && result.data && result.data.text) ? result.data.text : "";
-        if (ocrText && ocrText.length > 3) {
-          const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
-          const foundEmails = normalizeAndExtractEmails(ocrText, isStrict);
-          for (const em of foundEmails) {
-            const item = {
-              copy: em.toLowerCase().trim(),
-              email: em.toLowerCase().trim(),
-              url: task.mainPageUrl,
-              pdf: null,
-              image: task.imageUrl,
-              sourceType: "image",
-              sourceUrl: task.imageUrl,
-              mainPageUrl: task.mainPageUrl,
-              occurrences: 1,
-              sources: [{
+          const canvas = document.createElement("canvas");
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+
+          const result = await Promise.race([
+            worker.recognize(dataUrl),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("OCR timeout")), 2500))
+          ]);
+
+          const ocrText = (result && result.data && result.data.text) ? result.data.text : "";
+          if (ocrText && ocrText.length > 3) {
+            const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
+            const foundEmails = normalizeAndExtractEmails(ocrText, isStrict);
+            for (const em of foundEmails) {
+              const item = {
+                copy: em.toLowerCase().trim(),
+                email: em.toLowerCase().trim(),
+                url: task.mainPageUrl,
+                pdf: null,
+                image: task.imageUrl,
                 sourceType: "image",
                 sourceUrl: task.imageUrl,
                 mainPageUrl: task.mainPageUrl,
-                image: task.imageUrl,
-                pdf: null,
-                timestamp: new Date().toISOString()
-              }]
-            };
-            registerFoundEmail(item);
-            chrome.runtime.sendMessage({ type: "EMAIL_FOUND", finding: item }).catch(() => {});
+                occurrences: 1,
+                sources: [{
+                  sourceType: "image",
+                  sourceUrl: task.imageUrl,
+                  mainPageUrl: task.mainPageUrl,
+                  image: task.imageUrl,
+                  pdf: null,
+                  timestamp: new Date().toISOString()
+                }]
+              };
+              registerFoundEmail(item);
+              chrome.runtime.sendMessage({ type: "EMAIL_FOUND", finding: item }).catch(() => {});
+            }
           }
         }
+      } catch (err) {
+        console.debug("OCR notice on image:", task.imageUrl, err.message);
+      } finally {
+        if (objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+        }
       }
-    } catch (err) {
-      console.debug("OCR notice on image:", task.imageUrl, err.message);
-    } finally {
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-      }
+
+      await new Promise((r) => setTimeout(r, 60));
     }
-
-    await new Promise((r) => setTimeout(r, 100));
+  } finally {
+    isProcessingImages = false;
+    if (ocrStatus) ocrStatus.style.display = "none";
   }
-
-  isProcessingImages = false;
-  if (ocrStatus) ocrStatus.style.display = "none";
 }
 
 // ── Message Listener ─────────────────────────────────────────────────
@@ -531,7 +538,7 @@ startBtn.addEventListener("click", async () => {
   let initialFindings = [];
   let initialLinks = [];
 
-  // Harvest DOM from currently active tab if URL matches
+  // Harvest DOM from currently active tab if URL matches (with 800ms timeout guard)
   if (
     activeTabObj &&
     activeTabObj.id &&
@@ -539,21 +546,34 @@ startBtn.addEventListener("click", async () => {
     targetUrl.split("#")[0].replace(/\/$/, "") === activeTabObj.url.split("#")[0].replace(/\/$/, "")
   ) {
     statusText.textContent = "Harvesting live page elements & scripts...";
-    const domHarvest = await harvestActiveTabDom(activeTabObj.id);
-    if (domHarvest.emails.length > 0) {
-      for (const em of domHarvest.emails) {
-        const item = {
-          email: em,
-          sourceType: "HTML (Live Tab)",
-          sourceUrl: targetUrl,
-          mainPageUrl: targetUrl
-        };
-        registerFoundEmail(item);
-        initialFindings.push(item);
+    try {
+      const domHarvest = await Promise.race([
+        harvestActiveTabDom(activeTabObj.id),
+        new Promise((resolve) => setTimeout(() => resolve({ emails: [], links: [] }), 800))
+      ]);
+      if (domHarvest && Array.isArray(domHarvest.emails) && domHarvest.emails.length > 0) {
+        for (const em of domHarvest.emails) {
+          const item = {
+            copy: em.toLowerCase().trim(),
+            email: em.toLowerCase().trim(),
+            url: targetUrl,
+            pdf: null,
+            image: null,
+            sourceType: "html",
+            sourceUrl: targetUrl,
+            mainPageUrl: targetUrl
+          };
+          registerFoundEmail(item);
+          initialFindings.push(item);
+        }
       }
+      initialLinks = (domHarvest && domHarvest.links) || [];
+    } catch (e) {
+      console.debug("Live tab harvest skipped:", e);
     }
-    initialLinks = domHarvest.links || [];
   }
+
+  statusText.textContent = "Connecting to website and crawling pages...";
 
   chrome.runtime.sendMessage(
     {
@@ -562,7 +582,7 @@ startBtn.addEventListener("click", async () => {
       maxPages: parseInt(maxPagesSelect.value, 10),
       concurrency: parseInt(concurrencySelect.value, 10),
       checkPdfs: checkPdfsCheckbox.checked,
-      ocrImages: ocrImagesCheckbox ? ocrImagesCheckbox.checked : true,
+      ocrImages: !!(ocrImagesCheckbox && ocrImagesCheckbox.checked),
       filterCompliance: filterComplianceCheckbox ? filterComplianceCheckbox.checked : true,
       includeSubdomains: includeSubdomainsCheckbox.checked,
       initialFindings,

@@ -105,8 +105,17 @@ function isContactCandidateImage(imgUrl, alt, title, pageUrl) {
   const looksLikeImagePath = /\/(?:images?|img|photos?|pics?|upload|assets?|static|media|files?|graphics?)\//i.test(imgUrl);
   if (!hasImageExt && !looksLikeImagePath) return false;
 
+  // Direct email in image filename or query
+  if (imgUrl.includes("@") || imgUrl.includes("%40") || /_at_|\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i.test(imgUrl)) {
+    return true;
+  }
+
   const combined = `${imgUrl} ${alt || ""} ${title || ""}`.toLowerCase();
   if (CONTACT_IMAGE_KEYWORD_REGEX.test(combined)) return true;
+
+  if (pageUrl && /(?:contact|about|touch|inquiry|profile|intro)/i.test(pageUrl)) {
+    if (/(?:banner|card|header|cert|upload|files?|company|profile|duns|iso)/i.test(clean)) return true;
+  }
 
   return false;
 }
@@ -903,79 +912,7 @@ async function runProductionCrawl(crawlState) {
     findingsCount: findings.length
   });
 
-  // Fast parallel sitemap pre-discovery: seeds site pages in < 1.5s
-  try {
-    const sitemapUrls = await probeSitemaps(baseOrigin, crawlAbortController.signal);
-    const prioritySeeds = [];
-    const normalSeeds = [];
-    for (const smUrl of sitemapUrls) {
-      if (crawlState.aborted) break;
-      const cUrl = cleanAndNormalizeUrl(smUrl, startUrl);
-      if (cUrl && isUrlInScope(cUrl, baseOrigin, baseHostname, includeSubdomains)) {
-        if (cUrl.toLowerCase().endsWith(".pdf")) {
-          if (checkPdfs) enqueuePdf(cUrl, startUrl);
-          continue;
-        }
-        if (!enqueuedHtmlUrls.has(cUrl)) {
-          enqueuedHtmlUrls.add(cUrl);
-          if (HIGH_PRIORITY_REGEX.test(cUrl)) {
-            prioritySeeds.push(cUrl);
-          } else {
-            normalSeeds.push(cUrl);
-          }
-        }
-      }
-    }
-    if (prioritySeeds.length > 0) {
-      htmlQueue.unshift(...prioritySeeds.slice(-500));
-    }
-    if (normalSeeds.length > 0 && htmlQueue.length < maxPages) {
-      htmlQueue.push(...normalSeeds.slice(0, maxPages - htmlQueue.length));
-    }
-  } catch {}
-
-  // Deep URL Navigation Seeding: root (/), multi-language paths (/en/, /zh-tw/), contact, catalog, & about pages
-  try {
-    const rawPath = startObj.pathname;
-    const rootUrl = cleanAndNormalizeUrl(baseOrigin + "/", startUrl);
-    if (rootUrl && !enqueuedHtmlUrls.has(rootUrl)) {
-      enqueuedHtmlUrls.add(rootUrl);
-      htmlQueue.push(rootUrl);
-    }
-
-    const standardContactPaths = [
-      "contact.html", "contact-us.html", "contact_us.html", "contactus.html",
-      "contacts.html", "about.html", "about-us.html", "about_us.html", "aboutus.html",
-      "company-profile.html", "contact", "contact-us", "about", "about-us",
-      "inquiry-cart.html", "inquiry.html", "e-catalog.html", "catalog.html",
-      "download.html", "downloads.html", "a1/Company-Profile.html", "news.html"
-    ];
-
-    const topLanguagePrefixes = ["/", "/en/", "/zh-tw/", "/zh-cn/", "/es/", "/de/", "/fr/", "/ja/"];
-
-    for (const prefix of topLanguagePrefixes) {
-      if (htmlQueue.length + visitedUrls.size >= maxPages) break;
-      const lUrl = cleanAndNormalizeUrl(`${baseOrigin}${prefix}`, startUrl);
-      if (lUrl && !enqueuedHtmlUrls.has(lUrl)) {
-        enqueuedHtmlUrls.add(lUrl);
-        htmlQueue.push(lUrl);
-      }
-      for (const p of standardContactPaths) {
-        if (htmlQueue.length + visitedUrls.size >= maxPages) break;
-        const cUrl = cleanAndNormalizeUrl(`${baseOrigin}${prefix}${p}`, startUrl);
-        if (cUrl && !enqueuedHtmlUrls.has(cUrl)) {
-          enqueuedHtmlUrls.add(cUrl);
-          if (HIGH_PRIORITY_REGEX.test(cUrl)) {
-            htmlQueue.unshift(cUrl);
-          } else {
-            htmlQueue.push(cUrl);
-          }
-        }
-      }
-    }
-  } catch {}
-
-  // Ingest initial links from active tab
+  // Ingest initial links from active tab right after initialUrl
   if (Array.isArray(initialLinks)) {
     for (const rawL of initialLinks) {
       if (crawlState.aborted) break;
@@ -988,7 +925,8 @@ async function runProductionCrawl(crawlState) {
         if (!enqueuedHtmlUrls.has(cUrl) && htmlQueue.length + visitedUrls.size < maxPages) {
           enqueuedHtmlUrls.add(cUrl);
           if (HIGH_PRIORITY_REGEX.test(cUrl)) {
-            htmlQueue.unshift(cUrl);
+            // Priority links go right behind initialUrl
+            htmlQueue.splice(1, 0, cUrl);
           } else {
             htmlQueue.push(cUrl);
           }
@@ -996,6 +934,54 @@ async function runProductionCrawl(crawlState) {
       }
     }
   }
+
+  // Sensible fallback contact paths on base origin, appended at end of queue
+  const standardFallbackPaths = [
+    "/contact.html", "/contact-us.html", "/contact_us.html", "/contact",
+    "/about.html", "/about-us.html", "/about_us.html", "/about",
+    "/company-profile.html", "/inquiry.html", "/e-catalog.html"
+  ];
+  for (const p of standardFallbackPaths) {
+    if (htmlQueue.length + visitedUrls.size >= maxPages) break;
+    const cUrl = cleanAndNormalizeUrl(`${baseOrigin}${p}`, startUrl);
+    if (cUrl && !enqueuedHtmlUrls.has(cUrl)) {
+      enqueuedHtmlUrls.add(cUrl);
+      htmlQueue.push(cUrl);
+    }
+  }
+
+  // Non-blocking background sitemap pre-discovery: feeds real sitemap URLs dynamically into queue
+  probeSitemaps(baseOrigin, crawlAbortController.signal)
+    .then((sitemapUrls) => {
+      if (crawlState.aborted || !Array.isArray(sitemapUrls)) return;
+      const prioritySeeds = [];
+      const normalSeeds = [];
+      for (const smUrl of sitemapUrls) {
+        if (crawlState.aborted) break;
+        const cUrl = cleanAndNormalizeUrl(smUrl, startUrl);
+        if (cUrl && isUrlInScope(cUrl, baseOrigin, baseHostname, includeSubdomains)) {
+          if (cUrl.toLowerCase().endsWith(".pdf")) {
+            if (checkPdfs) enqueuePdf(cUrl, startUrl);
+            continue;
+          }
+          if (!enqueuedHtmlUrls.has(cUrl)) {
+            enqueuedHtmlUrls.add(cUrl);
+            if (HIGH_PRIORITY_REGEX.test(cUrl)) {
+              prioritySeeds.push(cUrl);
+            } else {
+              normalSeeds.push(cUrl);
+            }
+          }
+        }
+      }
+      if (prioritySeeds.length > 0) {
+        htmlQueue.unshift(...prioritySeeds.slice(-200));
+      }
+      if (normalSeeds.length > 0 && htmlQueue.length < maxPages) {
+        htmlQueue.push(...normalSeeds.slice(0, maxPages - htmlQueue.length));
+      }
+    })
+    .catch(() => {});
 
   // ── Worker Task Processor ──────────────────────────────────────────
   async function processTask(currentItem, mode) {
@@ -1125,6 +1111,16 @@ async function runProductionCrawl(crawlState) {
             }
           }
 
+          // Direct email in image filename or query
+          if (fullImgUrl.includes("@") || /%40|_at_/i.test(fullImgUrl)) {
+            try {
+              const urlEmails = normalizeAndExtractEmails(decodeURIComponent(fullImgUrl));
+              for (const em of urlEmails) {
+                recordCleanEmail(em, finalUrl, "image", finalUrl, { image: fullImgUrl, sourceType: "image" });
+              }
+            } catch {}
+          }
+
           // 2. Direct SVG vector text inspection (only for contact SVGs, max 1.5s timeout)
           if (fullImgUrl.toLowerCase().endsWith(".svg") || fullImgUrl.includes(".svg?")) {
             visitedImages.add(fullImgUrl);
@@ -1248,7 +1244,9 @@ async function runProductionCrawl(crawlState) {
     return null;
   }
 
+  const crawlStartTime = Date.now();
   async function workerThread() {
+    let idleWaitAttempts = 0;
     while (!crawlState.aborted && !allWorkCompleted) {
       const task = getNextTask();
 
@@ -1258,16 +1256,34 @@ async function runProductionCrawl(crawlState) {
           continue;
         }
 
-        // Grace period check
-        await new Promise((r) => setTimeout(r, 100));
+        // Within first 2 seconds, give initialUrl time to finish and enqueue its child links
+        if (Date.now() - crawlStartTime < 2000 && visitedUrls.size === 0) {
+          await new Promise((r) => setTimeout(r, 100));
+          continue;
+        }
+
+        // Grace period check: 5 checks of 100ms
+        idleWaitAttempts++;
+        if (idleWaitAttempts < 6) {
+          await new Promise((r) => setTimeout(r, 100));
+          continue;
+        }
+
         if (crawlState.aborted || allWorkCompleted) break;
-        if ((htmlQueue.length > 0 && visitedUrls.size < maxPages) || (checkPdfs && pdfQueue.length > 0)) continue;
-        if (activeWorkersCount > 0) continue;
+        if ((htmlQueue.length > 0 && visitedUrls.size < maxPages) || (checkPdfs && pdfQueue.length > 0)) {
+          idleWaitAttempts = 0;
+          continue;
+        }
+        if (activeWorkersCount > 0) {
+          idleWaitAttempts = 0;
+          continue;
+        }
 
         allWorkCompleted = true;
         break;
       }
 
+      idleWaitAttempts = 0;
       activeWorkersCount++;
       if (task.mode === "pdf") activePdfWorkers++;
 
@@ -1294,27 +1310,25 @@ async function runProductionCrawl(crawlState) {
     const d = (f.email.split("@")[1] || "").toLowerCase();
     return /^(?:gmail|yahoo|hotmail|outlook|live|aol|qq|163|126|sina)\./i.test(d);
   });
-  const shouldEnrich = (findings.length < 3 || hasOnlyGenericEmail) && !crawlState.aborted;
+  const shouldEnrich = (findings.length < 2 || hasOnlyGenericEmail) && !crawlState.aborted;
 
   if (shouldEnrich) {
-    emitProgress({
-      pagesCrawled: visitedUrls.size,
-      pdfsCrawled: visitedPdfs.size,
-      queueRemaining: 0,
-      currentUrl: "Probing company domain records & sister TLDs...",
-      findingsCount: findings.length
-    });
-
-    const fallbackList = await discoverSisterDomainEmails(
-      startUrl,
-      Array.from(discoveredCompanyKeywords)
-    );
-
-    for (const item of fallbackList) {
-      recordCleanEmail(item.email, item.sourceUrl, "html", item.sourceUrl, {
-        sourceType: "html"
-      });
-    }
+    try {
+      await Promise.race([
+        (async () => {
+          const fallbackList = await discoverSisterDomainEmails(
+            startUrl,
+            Array.from(discoveredCompanyKeywords)
+          );
+          for (const item of fallbackList) {
+            recordCleanEmail(item.email, item.sourceUrl, "html", item.sourceUrl, {
+              sourceType: "html"
+            });
+          }
+        })(),
+        new Promise((r) => setTimeout(r, 2000))
+      ]);
+    } catch {}
   }
 
   // Sort findings: primary target-domain emails first, followed by others ordered by frequency
