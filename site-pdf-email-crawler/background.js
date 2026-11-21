@@ -939,6 +939,8 @@ function persistCrawlState(isComplete = false) {
       pagesCrawled: crawl.visitedUrls ? crawl.visitedUrls.size : (crawl.pagesCrawled || 0),
       pdfsChecked: crawl.visitedPdfs ? crawl.visitedPdfs.size : (crawl.pdfsChecked || 0),
       findings: crawl.findings || [],
+      discoveredPdfs: crawl.discoveredPdfs || [],
+      discoveredImages: crawl.discoveredImages || [],
       lastUpdated: Date.now()
     }
   }).catch(() => {});
@@ -996,8 +998,14 @@ async function runProductionCrawl(crawlState) {
   const discoveredCompanyKeywords = new Set();
   const findingsMap = new Map();
   const findings = [];
+  const discoveredPdfs = [];
+  const discoveredImages = [];
+  const discoveredPdfsSet = new Set();
+  const discoveredImagesSet = new Set();
 
   crawlState.findings = findings;
+  crawlState.discoveredPdfs = discoveredPdfs;
+  crawlState.discoveredImages = discoveredImages;
   crawlState.visitedUrls = visitedUrls;
   crawlState.visitedPdfs = visitedPdfs;
   crawlState.visitedImages = visitedImages;
@@ -1059,6 +1067,20 @@ async function runProductionCrawl(crawlState) {
     if (!checkPdfs) return;
     const pdfUrl = cleanAndNormalizeUrl(rawPdfUrl, sourcePage);
     if (!pdfUrl) return;
+
+    if (!discoveredPdfsSet.has(pdfUrl)) {
+      discoveredPdfsSet.add(pdfUrl);
+      const pdfRecord = {
+        url: pdfUrl,
+        sourcePage: sourcePage || startUrl,
+        status: "Queued",
+        emailsFound: 0,
+        timestamp: new Date().toISOString()
+      };
+      discoveredPdfs.push(pdfRecord);
+      chrome.runtime.sendMessage({ type: "PDF_DISCOVERED", pdf: pdfRecord }).catch(() => {});
+    }
+
     if (visitedPdfs.has(pdfUrl) || enqueuedPdfUrls.has(pdfUrl)) return;
 
     // Scale PDF limit generously with maxPages (up to 300 PDFs, minimum 100)
@@ -1226,8 +1248,30 @@ async function runProductionCrawl(crawlState) {
         for (const em of extractedPdfEmails) {
           recordCleanEmail(em, currentUrl, "pdf", mainSitePage, { pdf: currentUrl, sourceType: "pdf" });
         }
+
+        const pdfRec = discoveredPdfs.find((p) => p.url === currentUrl);
+        if (pdfRec) {
+          pdfRec.status = extractedPdfEmails.length > 0 ? `Scanned (${extractedPdfEmails.length} emails)` : "Scanned (0 emails)";
+          pdfRec.emailsFound = extractedPdfEmails.length;
+          chrome.runtime.sendMessage({
+            type: "UPDATE_PDF_STATUS",
+            url: currentUrl,
+            status: pdfRec.status,
+            emailsFound: pdfRec.emailsFound
+          }).catch(() => {});
+        }
       } catch (err) {
         console.debug("PDF fetch error:", currentUrl, err.message);
+        const pdfRec = discoveredPdfs.find((p) => p.url === currentUrl);
+        if (pdfRec) {
+          pdfRec.status = "Failed";
+          chrome.runtime.sendMessage({
+            type: "UPDATE_PDF_STATUS",
+            url: currentUrl,
+            status: "Failed",
+            emailsFound: 0
+          }).catch(() => {});
+        }
       }
     }
     // ── Process HTML Web Page ─────────────────────────────────────────
@@ -1302,7 +1346,23 @@ async function runProductionCrawl(crawlState) {
       if (Array.isArray(imageCandidates)) {
         for (const img of imageCandidates) {
           const fullImgUrl = cleanAndNormalizeUrl(img.url, finalUrl);
-          if (!fullImgUrl || visitedImages.has(fullImgUrl)) continue;
+          if (!fullImgUrl) continue;
+
+          if (!discoveredImagesSet.has(fullImgUrl)) {
+            discoveredImagesSet.add(fullImgUrl);
+            const imgRecord = {
+              url: fullImgUrl,
+              sourcePage: finalUrl,
+              altText: img.alt || "",
+              titleText: img.title || "",
+              status: "Discovered",
+              timestamp: new Date().toISOString()
+            };
+            discoveredImages.push(imgRecord);
+            chrome.runtime.sendMessage({ type: "IMAGE_DISCOVERED", image: imgRecord }).catch(() => {});
+          }
+
+          if (visitedImages.has(fullImgUrl)) continue;
 
           // 1. Direct alt/title text inspection
           const combinedImgText = `${img.alt || ""} ${img.title || ""}`;
@@ -1580,7 +1640,9 @@ async function runProductionCrawl(crawlState) {
     pagesCrawled: visitedUrls.size,
     pdfsChecked: visitedPdfs.size,
     aborted: crawlState.aborted,
-    findings
+    findings,
+    discoveredPdfs,
+    discoveredImages
   };
 }
 
@@ -1651,6 +1713,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         isCrawling: true,
         aborted: false,
         findings: activeCrawl.findings || [],
+        discoveredPdfs: activeCrawl.discoveredPdfs || [],
+        discoveredImages: activeCrawl.discoveredImages || [],
         stats: {
           pagesCrawled: activeCrawl.visitedUrls ? activeCrawl.visitedUrls.size : 0,
           pdfsChecked: activeCrawl.visitedPdfs ? activeCrawl.visitedPdfs.size : 0
@@ -1663,6 +1727,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         isCrawling: false,
         aborted: !!lastCompletedCrawl.aborted,
         findings: lastCompletedCrawl.findings || [],
+        discoveredPdfs: lastCompletedCrawl.discoveredPdfs || [],
+        discoveredImages: lastCompletedCrawl.discoveredImages || [],
         stats: {
           pagesCrawled: lastCompletedCrawl.pagesCrawled || 0,
           pdfsChecked: lastCompletedCrawl.pdfsChecked || 0
@@ -1678,13 +1744,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             isCrawling: false,
             aborted: saved.status === "stopped",
             findings: saved.findings || [],
+            discoveredPdfs: saved.discoveredPdfs || [],
+            discoveredImages: saved.discoveredImages || [],
             stats: {
               pagesCrawled: saved.pagesCrawled || 0,
               pdfsChecked: saved.pdfsChecked || 0
             }
           });
         } else {
-          sendResponse({ ok: true, isCrawling: false, findings: [], stats: { pagesCrawled: 0, pdfsChecked: 0 } });
+          sendResponse({ ok: true, isCrawling: false, findings: [], discoveredPdfs: [], discoveredImages: [], stats: { pagesCrawled: 0, pdfsChecked: 0 } });
         }
       });
       return true;

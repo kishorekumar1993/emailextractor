@@ -247,6 +247,15 @@
       background-color: var(--danger-hover);
     }
 
+    .btn-highlight {
+      background-color: #10b981;
+      color: white;
+    }
+
+    .btn-highlight:hover:not(:disabled) {
+      background-color: #059669;
+    }
+
     .btn-secondary {
       background-color: #fff;
       border: 1px solid var(--border);
@@ -256,6 +265,104 @@
     .btn-secondary:hover:not(:disabled) {
       background-color: #f1f5f9;
       border-color: #cbd5e1;
+    }
+
+    .tabs-row {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 8px;
+      border-bottom: 2px solid var(--border);
+    }
+
+    .tab-btn {
+      padding: 6px 12px;
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      border-radius: 0;
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s;
+    }
+
+    .tab-btn:hover {
+      color: var(--text);
+    }
+
+    .tab-btn.active {
+      color: var(--primary);
+      border-bottom-color: var(--primary);
+      background: transparent;
+      font-weight: 700;
+    }
+
+    .stat-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.15s, background-color 0.15s;
+    }
+
+    .stat-card:hover {
+      border-color: var(--primary);
+      background: #eff6ff;
+    }
+
+    .source-link {
+      color: var(--primary);
+      text-decoration: none;
+      word-break: break-all;
+    }
+
+    .source-link:hover {
+      text-decoration: underline;
+    }
+
+    .btn-sm-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      font-size: 10px;
+      font-weight: 600;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: #f8fafc;
+      color: var(--text);
+      cursor: pointer;
+      text-decoration: none;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+
+    .btn-sm-action:hover {
+      background: #e2e8f0;
+      border-color: #94a3b8;
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      background: #f1f5f9;
+      color: #475569;
+    }
+
+    .status-badge.has-email {
+      background: #dcfce7;
+      color: #166534;
+      font-weight: 700;
     }
 
     .stats-bar {
@@ -459,26 +566,29 @@
   <div class="actions-row">
     <button id="startBtn" class="btn-primary">▶ Crawl Website</button>
     <button id="stopBtn" class="btn-danger" style="display: none;">⏹ Stop</button>
+    <button id="copyAllUnifiedBtn" class="btn-highlight" disabled>📋 Copy All (Emails + PDFs + Images)</button>
     <button id="copyBtn" class="btn-secondary" disabled>📧 Copy Emails</button>
     <button id="copyPathBtn" class="btn-secondary" disabled>📋 Copy with Source Page</button>
+    <button id="copyPdfLinksBtn" class="btn-secondary" disabled>📄 Copy PDF Links</button>
+    <button id="copyImageLinksBtn" class="btn-secondary" disabled>🖼️ Copy Image Links</button>
     <button id="exportBtn" class="btn-secondary" disabled>📥 Export CSV</button>
     <button id="exportJsonBtn" class="btn-secondary" disabled>📦 Export JSON</button>
   </div>
 
   <div class="stats-bar">
-    <div class="stat-card">
+    <div id="statCardPages" class="stat-card" title="Click to view crawled pages">
       <div id="statPages" class="stat-val">0</div>
       <div class="stat-lbl">Pages Crawled</div>
     </div>
-    <div class="stat-card">
+    <div id="statCardPdfs" class="stat-card" title="Click to view discovered PDF links">
       <div id="statPdfs" class="stat-val">0</div>
       <div class="stat-lbl">PDFs Checked</div>
     </div>
-    <div class="stat-card">
+    <div id="statCardImages" class="stat-card" title="Click to view discovered images">
       <div id="statImages" class="stat-val">0</div>
       <div class="stat-lbl">Images OCR</div>
     </div>
-    <div class="stat-card">
+    <div id="statCardEmails" class="stat-card" title="Click to view extracted emails">
       <div id="statEmails" class="stat-val">0</div>
       <div class="stat-lbl">Emails Found</div>
     </div>
@@ -492,10 +602,17 @@
 
   <div id="statusText" class="status-text">Ready. Open website and click "Crawl Website".</div>
 
+  <!-- Tabs Navigation -->
+  <div class="tabs-row">
+    <button id="tabEmailsBtn" class="tab-btn active">📧 Extracted Emails (<span id="tabEmailsCount">0</span>)</button>
+    <button id="tabPdfsBtn" class="tab-btn">📄 Discovered PDF Links (<span id="tabPdfsCount">0</span>)</button>
+    <button id="tabImagesBtn" class="tab-btn">🖼️ Discovered Images (<span id="tabImagesCount">0</span>)</button>
+  </div>
+
   <input type="text" id="searchInput" class="search-box"
     placeholder="🔍 Search extracted emails, source pages, or domains..." style="display:none;" />
 
-  <!-- Emails Table -->
+  <!-- View 1: Emails Table -->
   <div id="emailsTableContainer" class="table-container">
     <table>
       <thead>
@@ -509,6 +626,44 @@
       <tbody id="resultsBody">
         <tr>
           <td colspan="4" class="empty-state">No emails extracted yet. Click "Crawl Website" to start.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- View 2: Discovered PDF Links Provision Table -->
+  <div id="pdfsTableContainer" class="table-container" style="display: none;">
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 40%;">Direct PDF Document Link</th>
+          <th style="width: 36%;">Found On (Page URL)</th>
+          <th style="width: 14%;">Scan Status</th>
+          <th style="width: 10%; text-align: center;">Download</th>
+        </tr>
+      </thead>
+      <tbody id="pdfsBody">
+        <tr>
+          <td colspan="4" class="empty-state">No PDF documents discovered yet.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- View 3: Discovered Images Provision Table -->
+  <div id="imagesTableContainer" class="table-container" style="display: none;">
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 42%;">Direct Image URL</th>
+          <th style="width: 36%;">Found On (Page URL)</th>
+          <th style="width: 12%;">Alt / Title Text</th>
+          <th style="width: 10%; text-align: center;">Open</th>
+        </tr>
+      </thead>
+      <tbody id="imagesBody">
+        <tr>
+          <td colspan="4" class="empty-state">No images discovered yet.</td>
         </tr>
       </tbody>
     </table>
