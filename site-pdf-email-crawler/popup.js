@@ -46,6 +46,7 @@ const concurrencySelect = document.getElementById("concurrencySelect");
 const checkPdfsCheckbox = document.getElementById("checkPdfs");
 const ocrImagesCheckbox = document.getElementById("ocrImages");
 const filterComplianceCheckbox = document.getElementById("filterCompliance");
+const onlyDomainEmailsCheckbox = document.getElementById("onlyDomainEmails");
 const includeSubdomainsCheckbox = document.getElementById("includeSubdomains");
 const alwaysWindowModeCheckbox = document.getElementById("alwaysWindowMode");
 
@@ -142,7 +143,8 @@ function escapeHtml(str) {
 }
 
 function updateActionButtons() {
-  const hasEmails = currentFindings.length > 0;
+  const visibleEmails = typeof getVisibleFindings === "function" ? getVisibleFindings() : currentFindings;
+  const hasEmails = visibleEmails.length > 0;
   const hasPdfs = currentPdfs.length > 0;
   const hasImages = currentImages.length > 0;
   const hasAnyData = hasEmails || hasPdfs || hasImages;
@@ -155,16 +157,49 @@ function updateActionButtons() {
   if (exportBtn) exportBtn.disabled = !hasAnyData;
   if (exportJsonBtn) exportJsonBtn.disabled = !hasAnyData;
 
-  if (tabEmailsCount) tabEmailsCount.textContent = currentFindings.length;
+  if (tabEmailsCount) tabEmailsCount.textContent = visibleEmails.length;
   if (tabPdfsCount) tabPdfsCount.textContent = currentPdfs.length;
   if (tabImagesCount) tabImagesCount.textContent = currentImages.length;
-  if (statEmails) statEmails.textContent = currentFindings.length;
+  if (statEmails) statEmails.textContent = visibleEmails.length;
   if (statPdfs) statPdfs.textContent = currentPdfs.length;
   if (statImages) statImages.textContent = currentImages.length;
 
   if (hasAnyData && searchInput) {
     searchInput.style.display = "block";
   }
+}
+
+function getCleanTargetDomain() {
+  try {
+    const rawTarget = targetUrlInput ? targetUrlInput.value.trim() : "";
+    if (rawTarget) {
+      const u = new URL(rawTarget.startsWith("http") ? rawTarget : "https://" + rawTarget);
+      return u.hostname.toLowerCase().replace(/^www\./, "");
+    }
+  } catch {}
+  return "";
+}
+
+function isEmailDomainMatch(email) {
+  if (!email || !email.includes("@")) return false;
+  const targetDomain = getCleanTargetDomain();
+  if (!targetDomain) return true;
+  const emailDomain = email.split("@")[1].toLowerCase();
+  return emailDomain === targetDomain || emailDomain.endsWith("." + targetDomain) || targetDomain.endsWith("." + emailDomain);
+}
+
+function getVisibleFindings() {
+  if (onlyDomainEmailsCheckbox && onlyDomainEmailsCheckbox.checked) {
+    return currentFindings.filter((f) => isEmailDomainMatch(f.copy || f.email));
+  }
+  return currentFindings;
+}
+
+if (onlyDomainEmailsCheckbox) {
+  onlyDomainEmailsCheckbox.addEventListener("change", () => {
+    applyCurrentSearchFilter();
+    updateActionButtons();
+  });
 }
 
 function appendEmailRow(finding) {
@@ -184,8 +219,13 @@ function appendEmailRow(finding) {
   const occurrences = finding.occurrences || (finding.sources ? finding.sources.length : 1);
   const displayUrl = finding.url || finding.sourceUrl || finding.mainPageUrl || "";
 
+  const isMatch = isEmailDomainMatch(normEmail);
+  const domainBadgeHtml = isMatch
+    ? `<span class="domain-badge domain-match" title="Direct match with website domain">✓ Domain Match</span>`
+    : `<span class="domain-badge domain-external" title="External or ISP email address">ISP / External</span>`;
+
   const rowHtml = `
-    <td><strong>${escapeHtml(normEmail)}</strong></td>
+    <td><strong>${escapeHtml(normEmail)}</strong>${domainBadgeHtml}</td>
     <td><span class="type-badge ${typeBadgeClass}">${escapeHtml((finding.sourceType || "HTML").toUpperCase())}</span></td>
     <td><a class="source-link" href="${escapeHtml(displayUrl)}" target="_blank" title="${escapeHtml(displayUrl)}">${escapeHtml(displayUrl)}</a></td>
     <td style="text-align: center;"><strong>${occurrences}</strong></td>
@@ -226,7 +266,7 @@ function registerFoundEmail(finding) {
     appendEmailRow(finding);
   }
 
-  statEmails.textContent = currentFindings.length;
+  statEmails.textContent = getVisibleFindings().length;
   updateActionButtons();
 }
 
@@ -234,12 +274,16 @@ function renderEmailRows(items) {
   resultsBody.innerHTML = "";
   emailRowsMap.clear();
 
-  if (items.length === 0) {
-    resultsBody.innerHTML = `<tr><td colspan="4" class="empty-state">${currentFindings.length > 0 ? "No emails matching your search query." : "No emails extracted yet. Click 'Crawl Website' to start."}</td></tr>`;
+  const visibleItems = onlyDomainEmailsCheckbox && onlyDomainEmailsCheckbox.checked
+    ? items.filter((f) => isEmailDomainMatch(f.copy || f.email))
+    : items;
+
+  if (visibleItems.length === 0) {
+    resultsBody.innerHTML = `<tr><td colspan="4" class="empty-state">${currentFindings.length > 0 ? "No emails matching current domain filter or search query." : "No emails extracted yet. Click 'Crawl Website' to start."}</td></tr>`;
     return;
   }
 
-  for (const item of items) {
+  for (const item of visibleItems) {
     appendEmailRow(item);
   }
 }
@@ -340,7 +384,12 @@ function applyCurrentSearchFilter() {
   }
 
   if (activeTab === "emails") {
-    const filtered = currentFindings.filter(
+    const baseList = getVisibleFindings();
+    if (!q) {
+      renderEmailRows(baseList);
+      return;
+    }
+    const filtered = baseList.filter(
       (f) =>
         f.email.toLowerCase().includes(q) ||
         (f.sourceUrl && f.sourceUrl.toLowerCase().includes(q)) ||
@@ -709,6 +758,7 @@ startBtn.addEventListener("click", async () => {
       checkPdfs: checkPdfsCheckbox.checked,
       ocrImages: !!(ocrImagesCheckbox && ocrImagesCheckbox.checked),
       filterCompliance: filterComplianceCheckbox ? filterComplianceCheckbox.checked : true,
+      onlyDomainEmails: !!(onlyDomainEmailsCheckbox && onlyDomainEmailsCheckbox.checked),
       includeSubdomains: includeSubdomainsCheckbox.checked,
       initialFindings,
       initialLinks
@@ -750,12 +800,13 @@ stopBtn.addEventListener("click", () => {
 if (copyAllUnifiedBtn) {
   copyAllUnifiedBtn.addEventListener("click", () => {
     const sections = [];
+    const visibleEmails = getVisibleFindings();
 
-    if (currentFindings.length > 0) {
+    if (visibleEmails.length > 0) {
       sections.push(`=======================================================`);
-      sections.push(`EXTRACTED EMAIL ADDRESSES (${currentFindings.length})`);
+      sections.push(`EXTRACTED EMAIL ADDRESSES (${visibleEmails.length})`);
       sections.push(`=======================================================`);
-      for (const f of currentFindings) {
+      for (const f of visibleEmails) {
         sections.push(`${f.email}\t[${(f.sourceType || "HTML").toUpperCase()}]\tFound On: ${f.sourceUrl || f.mainPageUrl || ""}`);
       }
       sections.push("");
@@ -793,8 +844,9 @@ if (copyAllUnifiedBtn) {
 
 // ── Copy Emails ──────────────────────────────────────────────────────
 copyBtn.addEventListener("click", () => {
-  if (currentFindings.length === 0) return;
-  const uniqueEmails = Array.from(new Set(currentFindings.map((f) => f.email))).join("\n");
+  const visibleEmails = getVisibleFindings();
+  if (visibleEmails.length === 0) return;
+  const uniqueEmails = Array.from(new Set(visibleEmails.map((f) => f.email))).join("\n");
   navigator.clipboard.writeText(uniqueEmails).then(() => {
     const orig = copyBtn.textContent;
     copyBtn.textContent = "✅ Copied!";
@@ -804,8 +856,10 @@ copyBtn.addEventListener("click", () => {
 
 // ── Copy with Source Page ────────────────────────────────────────────
 copyPathBtn.addEventListener("click", () => {
+  const visibleEmails = getVisibleFindings();
+  if (visibleEmails.length === 0) return;
   const lines = ["email\tsource_type\tfound_on_page"];
-  for (const f of currentFindings) {
+  for (const f of visibleEmails) {
     lines.push(`${f.email}\t${f.sourceType || "HTML"}\t${f.sourceUrl || f.mainPageUrl || ""}`);
   }
   navigator.clipboard.writeText(lines.join("\n")).then(() => {
@@ -878,7 +932,8 @@ exportBtn.addEventListener("click", () => {
   } else {
     filename = `extracted_emails_${domain}_${dateStr}.csv`;
     rows.push(["Email", "Source Type", "Occurrences", "Source URL", "Main Website Page"].map(csvEscape).join(","));
-    for (const f of currentFindings) {
+    const visibleEmails = getVisibleFindings();
+    for (const f of visibleEmails) {
       rows.push([
         f.email,
         f.sourceType || "HTML",
@@ -908,16 +963,17 @@ if (exportJsonBtn) {
       ? targetUrlInput.value.replace(/^https?:\/\//i, "").split("/")[0].replace(/[^a-zA-Z0-9.-]/g, "_")
       : "site";
 
+    const visibleEmails = getVisibleFindings();
     const exportData = {
       targetUrl: targetUrlInput ? targetUrlInput.value.trim() : "",
       exportedAt: new Date().toISOString(),
       stats: {
-        emailsFound: currentFindings.length,
+        emailsFound: visibleEmails.length,
         pdfsDiscovered: currentPdfs.length,
         imagesDiscovered: currentImages.length,
         pagesCrawled: statPages ? statPages.textContent : "0"
       },
-      emails: currentFindings,
+      emails: visibleEmails,
       pdfs: currentPdfs,
       images: currentImages
     };

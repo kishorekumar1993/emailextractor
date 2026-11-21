@@ -1013,6 +1013,14 @@ async function runProductionCrawl(crawlState) {
   function recordCleanEmail(email, sourceUrl, sourceType, mainPageUrl, extraMeta = {}) {
     if (!email || !isValidEmail(email, filterCompliance)) return;
     const cleanEmail = email.trim().toLowerCase();
+
+    if (crawlState.onlyDomainEmails) {
+      const emailDomain = cleanEmail.split("@")[1];
+      const cleanBase = (baseHostname || "").toLowerCase().replace(/^www\./, "");
+      const isMatch = emailDomain === cleanBase || emailDomain.endsWith("." + cleanBase) || cleanBase.endsWith("." + emailDomain);
+      if (!isMatch) return;
+    }
+
     const existing = findingsMap.get(cleanEmail);
     const nowStr = new Date().toISOString();
 
@@ -1668,6 +1676,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       checkPdfs: msg.checkPdfs !== false,
       ocrImages: msg.ocrImages !== false,
       filterCompliance: msg.filterCompliance !== false,
+      onlyDomainEmails: !!msg.onlyDomainEmails,
       includeSubdomains: !!msg.includeSubdomains,
       initialFindings: msg.initialFindings || [],
       initialLinks: msg.initialLinks || [],

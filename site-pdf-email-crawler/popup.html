@@ -365,6 +365,28 @@
       font-weight: 700;
     }
 
+    .domain-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 9px;
+      font-weight: 700;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+
+    .domain-match {
+      background: #dcfce7;
+      color: #15803d;
+      border: 1px solid #86efac;
+    }
+
+    .domain-external {
+      background: #f1f5f9;
+      color: #64748b;
+      border: 1px solid #cbd5e1;
+    }
+
     .stats-bar {
       display: grid;
       grid-template-columns: repeat(5, 1fr);
@@ -551,6 +573,10 @@
       <label class="checkbox-label" title="Filter out legal/GDPR/DPO compliance emails, placeholders, and unsubscribe notices">
         <input type="checkbox" id="filterCompliance" checked />
         <strong>Strict B2B Filter (Ignore GDPR, DPO, legal compliance & dummy emails)</strong>
+      </label>
+      <label class="checkbox-label" title="Extract only emails whose domain matches the target website (e.g. @b-line.com.tw), ignoring external/ISP emails">
+        <input type="checkbox" id="onlyDomainEmails" />
+        <strong>Domain Match Only (Extract only domain-matching emails, ignore ISP/external emails)</strong>
       </label>
       <label class="checkbox-label">
         <input type="checkbox" id="includeSubdomains" />
