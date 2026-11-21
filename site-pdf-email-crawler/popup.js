@@ -776,11 +776,10 @@ if (targetUrlInput && !targetUrlInput.value) {
   });
 }
 
-// Synchronize state with background service worker on load
-chrome.runtime.sendMessage({ type: "GET_CRAWL_STATUS" }, (res) => {
-  if (chrome.runtime.lastError || !res || !res.ok) return;
+function syncCrawlState(res) {
+  if (!res) return;
 
-  if (res.findings && res.findings.length > 0) {
+  if (Array.isArray(res.findings) && res.findings.length > 0) {
     for (const f of res.findings) {
       registerFoundEmail(f);
     }
@@ -790,13 +789,32 @@ chrome.runtime.sendMessage({ type: "GET_CRAWL_STATUS" }, (res) => {
   if (res.stats) {
     statPages.textContent = res.stats.pagesCrawled || 0;
     statPdfs.textContent = res.stats.pdfsChecked || 0;
+  } else if (res.pagesCrawled !== undefined) {
+    statPages.textContent = res.pagesCrawled || 0;
+    statPdfs.textContent = res.pdfsChecked || 0;
   }
 
-  if (res.isCrawling) {
+  if (res.isCrawling || res.status === "running") {
     isCrawling = true;
     startBtn.style.display = "none";
     stopBtn.style.display = "inline-flex";
     statusText.textContent = "Crawling in progress...";
+  } else if (res.findings && res.findings.length > 0) {
+    statusText.textContent = `Extracted ${currentFindings.length} unique emails from ${statPages.textContent} pages & ${statPdfs.textContent} PDFs.`;
+    updateActionButtons();
+  }
+}
+
+// Synchronize state with background service worker and local storage on load
+chrome.runtime.sendMessage({ type: "GET_CRAWL_STATUS" }, (res) => {
+  if (!chrome.runtime.lastError && res && res.ok && (res.findings?.length > 0 || res.isCrawling)) {
+    syncCrawlState(res);
+  } else {
+    chrome.storage.local.get(["lastCrawlState"], (data) => {
+      if (data && data.lastCrawlState) {
+        syncCrawlState(data.lastCrawlState);
+      }
+    });
   }
 });
 

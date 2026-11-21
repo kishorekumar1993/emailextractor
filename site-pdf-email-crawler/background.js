@@ -594,7 +594,7 @@ async function probeSitemaps(baseOrigin, abortSignal) {
       const res = await fetch(endpoint, {
         credentials: "omit",
         headers: { "Accept": "text/xml,application/xml,text/plain,*/*" },
-        signal: getSignal(1500)
+        signal: getSignal(3000)
       });
       if (!res.ok) return;
       const text = await res.text();
@@ -645,7 +645,7 @@ async function probeSitemaps(baseOrigin, abortSignal) {
         const res = await fetch(subUrl, {
           credentials: "omit",
           headers: { "Accept": "text/xml,application/xml,*/*" },
-          signal: getSignal(1500)
+          signal: getSignal(3000)
         });
         if (!res.ok) return;
         const xml = await res.text();
@@ -772,12 +772,32 @@ async function discoverSisterDomainEmails(startUrl, companyKeywords) {
 let activeCrawl = null;
 let lastCompletedCrawl = null;
 
+function persistCrawlState(isComplete = false) {
+  const crawl = activeCrawl || lastCompletedCrawl;
+  if (!crawl) return;
+  chrome.storage.local.set({
+    lastCrawlState: {
+      status: isComplete ? "completed" : (crawl.isCrawling ? "running" : (crawl.aborted ? "stopped" : "completed")),
+      startUrl: crawl.startUrl,
+      pagesCrawled: crawl.visitedUrls ? crawl.visitedUrls.size : (crawl.pagesCrawled || 0),
+      pdfsChecked: crawl.visitedPdfs ? crawl.visitedPdfs.size : (crawl.pdfsChecked || 0),
+      findings: crawl.findings || [],
+      lastUpdated: Date.now()
+    }
+  }).catch(() => {});
+}
+
 let lastProgressEmitTime = 0;
+let lastPersistTime = 0;
 function emitProgress(data) {
   const now = Date.now();
   if (now - lastProgressEmitTime < 100 && (data.queueRemaining ?? 0) !== 0) return;
   lastProgressEmitTime = now;
   chrome.runtime.sendMessage({ type: "CRAWL_PROGRESS", ...data }).catch(() => {});
+  if (now - lastPersistTime > 2000) {
+    lastPersistTime = now;
+    persistCrawlState(false);
+  }
 }
 
 function emitEmailFound(finding) {
@@ -794,7 +814,7 @@ async function runProductionCrawl(crawlState) {
   const crawlAbortController = new AbortController();
   crawlState.abortController = crawlAbortController;
 
-  function createFetchSignal(timeoutMs = 4500) {
+  function createFetchSignal(timeoutMs = 7500) {
     if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
       return AbortSignal.any([AbortSignal.timeout(timeoutMs), crawlAbortController.signal]);
     }
@@ -854,6 +874,7 @@ async function runProductionCrawl(crawlState) {
         if (!existing.pdf && pdfUrl) existing.pdf = pdfUrl;
         if (!existing.image && imageUrl) existing.image = imageUrl;
         emitEmailFound(existing);
+        persistCrawlState(false);
       }
     } else {
       const item = {
@@ -871,6 +892,7 @@ async function runProductionCrawl(crawlState) {
       findingsMap.set(cleanEmail, item);
       findings.push(item);
       emitEmailFound(item);
+      persistCrawlState(false);
     }
   }
 
@@ -1007,9 +1029,12 @@ async function runProductionCrawl(crawlState) {
         const res = await fetch(currentUrl, {
           credentials: "omit",
           headers: PDF_FETCH_HEADERS,
-          signal: createFetchSignal(3000)
+          signal: createFetchSignal(9000)
         });
-        if (!res.ok) return;
+        if (!res.ok) {
+          console.debug("PDF response non-OK:", res.status, currentUrl);
+          return;
+        }
 
         const contentType = (res.headers.get("content-type") || "").toLowerCase();
         if (contentType.includes("text/html")) return;
@@ -1021,7 +1046,7 @@ async function runProductionCrawl(crawlState) {
         let extractedPdfEmails = [];
         try {
           const uint8 = new Uint8Array(buffer);
-          const maxScanBytes = Math.min(uint8.length, 12 * 1024 * 1024);
+          const maxScanBytes = Math.min(uint8.length, 6 * 1024 * 1024);
           const binaryStr = new TextDecoder("latin1").decode(uint8.subarray(0, maxScanBytes));
           extractedPdfEmails = normalizeAndExtractEmails(binaryStr);
         } catch {}
@@ -1029,7 +1054,9 @@ async function runProductionCrawl(crawlState) {
         for (const em of extractedPdfEmails) {
           recordCleanEmail(em, currentUrl, "pdf", mainSitePage, { pdf: currentUrl, sourceType: "pdf" });
         }
-      } catch {}
+      } catch (err) {
+        console.debug("PDF fetch error:", currentUrl, err.message);
+      }
     }
     // ── Process HTML Web Page ─────────────────────────────────────────
     else {
@@ -1045,9 +1072,12 @@ async function runProductionCrawl(crawlState) {
         const res = await fetch(currentUrl, {
           credentials: "omit",
           headers: STANDARD_FETCH_HEADERS,
-          signal: createFetchSignal(2500)
+          signal: createFetchSignal(7500)
         });
-        if (!res.ok) return;
+        if (!res.ok) {
+          console.debug("HTML response non-OK:", res.status, currentUrl);
+          return;
+        }
 
         finalUrl = res.url || currentUrl;
         visitedUrls.add(finalUrl);
@@ -1393,10 +1423,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .then((data) => {
         lastCompletedCrawl = { ...data, isCrawling: false };
         if (activeCrawl === crawlState) activeCrawl = null;
+        persistCrawlState(true);
         chrome.runtime.sendMessage({ type: "CRAWL_COMPLETED", data: lastCompletedCrawl }).catch(() => {});
       })
       .catch((err) => {
         if (activeCrawl === crawlState) activeCrawl = null;
+        persistCrawlState(false);
         chrome.runtime.sendMessage({ type: "CRAWL_FAILED", error: err.message }).catch(() => {});
       });
 
@@ -1410,6 +1442,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (activeCrawl.abortController) {
         activeCrawl.abortController.abort();
       }
+      persistCrawlState(false);
     }
     sendResponse({ ok: true, stopped: true });
     return false;
@@ -1427,6 +1460,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           pdfsChecked: activeCrawl.visitedPdfs ? activeCrawl.visitedPdfs.size : 0
         }
       });
+      return false;
     } else if (lastCompletedCrawl) {
       sendResponse({
         ok: true,
@@ -1438,10 +1472,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           pdfsChecked: lastCompletedCrawl.pdfsChecked || 0
         }
       });
+      return false;
     } else {
-      sendResponse({ ok: true, isCrawling: false, findings: [], stats: { pagesCrawled: 0, pdfsChecked: 0 } });
+      chrome.storage.local.get(["lastCrawlState"], (data) => {
+        const saved = data && data.lastCrawlState;
+        if (saved) {
+          sendResponse({
+            ok: true,
+            isCrawling: saved.status === "running",
+            aborted: saved.status === "stopped",
+            findings: saved.findings || [],
+            stats: {
+              pagesCrawled: saved.pagesCrawled || 0,
+              pdfsChecked: saved.pdfsChecked || 0
+            }
+          });
+        } else {
+          sendResponse({ ok: true, isCrawling: false, findings: [], stats: { pagesCrawled: 0, pdfsChecked: 0 } });
+        }
+      });
+      return true;
     }
-    return false;
   }
 
   if (msg.type === "EMAIL_FOUND" && msg.finding) {
