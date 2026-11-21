@@ -52,14 +52,42 @@ const DUMMY_EMAILS = new Set([
   "your@email.com", "you@example.com", "name@example.com", "user@domain.com",
   "email@example.com", "email@domain.com", "test@test.com", "admin@domain.com",
   "info@domain.com", "support@domain.com", "contact@domain.com", "sample@email.com",
-  "someone@example.com", "john.doe@example.com", "jane.doe@example.com"
+  "someone@example.com", "john.doe@example.com", "jane.doe@example.com",
+  "name@email.co.uk", "name@company.com", "info@yourdomain.com", "sales@yourdomain.com",
+  "contact@yourdomain.com", "user@company.com", "someone@domain.com"
+]);
+
+// Dummy and template domain patterns
+const DUMMY_DOMAINS = new Set([
+  "email.com", "email.co.uk", "example.com", "example.org", "example.net", "example.co.uk",
+  "domain.com", "domain.co.uk", "sample.com", "sample.co.uk", "test.com", "test.co.uk", "testing.com",
+  "yourdomain.com", "yourcompany.com", "yoursite.com", "mycompany.com", "company.com", "site.com",
+  "website.com", "somedomain.com", "sentry.io", "wixpress.com", "wordpress.com", "cookiebot.com",
+  "onetrust.com", "cloudflare.com", "gravatar.com"
+]);
+
+// Dummy local prefixes in web templates
+const DUMMY_LOCAL_PREFIXES = new Set([
+  "name", "yourname", "your-name", "your.name", "your_name", "your", "youremail", "your-email", "your.email",
+  "user", "username", "someone", "placeholder", "sample", "test", "testing", "first.last", "fullname",
+  "client", "recipient"
+]);
+
+// Compliance, GDPR, DPO, legal notices & automated daemon emails
+const COMPLIANCE_LOCAL_REGEX = /^(?:gdpr|dpo|dpo_.*|groupdpo|nomarketing|no-marketing|unsubscribe|optout|opt-out|noreply|no-reply|donotreply|do-not-reply|mailer-daemon|auto-reply|dataprotection|data-protection|cookie|cookies|abuse|postmaster|webmaster|hostmaster)$/i;
+
+// English stop words and verbs that falsely trigger on bare text de-obfuscation
+const INVALID_LOCAL_PARTS = new Set([
+  "or", "and", "the", "in", "at", "to", "for", "of", "on", "by", "as", "is", "it",
+  "an", "be", "if", "so", "my", "no", "up", "we", "he", "do", "viewed", "available",
+  "located", "registered", "hosted", "see", "look", "lookat", "held", "effective"
 ]);
 
 // File extensions to skip during HTML page crawling
 const SKIP_EXT_REGEX = /\.(css|js|jsx|ts|tsx|map|json|xml|rss|atom|woff|woff2|ttf|eot|otf|mp4|webm|ogv|avi|mov|mp3|ogg|wav|flac|aac|zip|tar|gz|bz2|rar|7z|dmg|exe|msi|bin|iso|apk|ipa|wasm|jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif)$/i;
 
-// Paths to ignore
-const IGNORE_PATH_REGEX = /\/(?:wp-includes|wp-json|xmlrpc\.php|cdn-cgi|cgi-bin|node_modules|\.well-known)\//i;
+// Paths to ignore (includes pure compliance, GDPR, cookie policy & terms pages)
+const IGNORE_PATH_REGEX = /\/(?:wp-includes|wp-json|xmlrpc\.php|cdn-cgi|cgi-bin|node_modules|\.well-known|privacy-policy|privacy|cookie-policy|cookie-notice|cookies|terms-of-use|terms-of-service|terms-and-conditions|terms|legal-notice|legal|disclaimer|imprint-privacy|impressum-datenschutz|gdpr|dpo)\b/i;
 
 // High priority contact, catalog, download, and about pages across all languages
 const HIGH_PRIORITY_REGEX = /(?:contact|about|enquiry|inquiry|reach-us|get-in-touch|support|feedback|connect|team|staff|office|location|imprint|impressum|profile|catalog|catalogue|katalog|download|brochure|cert|spec|company|video|animation|media|tour|corp|exhibition|聯絡|關於|簡介|型錄|下載|影片|影音)/i;
@@ -141,7 +169,7 @@ function decodeHtmlEntities(str) {
     .replace(/&gt;/gi, ">");
 }
 
-function isValidEmail(email) {
+function isValidEmail(email, filterCompliance = true) {
   if (!email || typeof email !== "string") return false;
   const clean = email.trim().toLowerCase();
   if (clean.length < 5 || clean.length > 254) return false;
@@ -151,9 +179,17 @@ function isValidEmail(email) {
   const [local, domain] = atParts;
   if (!local || local.length < 1 || local.length > 64 || !domain) return false;
 
+  // Domain cannot start with www. or protocol prefix
+  if (domain.startsWith("www.") || domain.startsWith("http.") || domain.startsWith("https.") || domain.startsWith("ftp.")) {
+    return false;
+  }
+
   // Local part checks
   if (!/^[a-z0-9](?:[a-z0-9._%+-]*[a-z0-9])?$/.test(local)) return false;
   if (local.includes("..")) return false;
+
+  // Reject common English prepositions/verbs/stop words that falsely match sentences (e.g. or@all.it, viewed@...)
+  if (INVALID_LOCAL_PARTS.has(local)) return false;
 
   // Domain checks
   if (!domain.includes(".") || domain.startsWith(".") || domain.endsWith(".")) return false;
@@ -175,10 +211,19 @@ function isValidEmail(email) {
   if (BAD_ASSET_EXTENSIONS.has(tld)) return false;
   if (DUMMY_EMAILS.has(clean)) return false;
 
+  // Reject dummy domains (email.com, email.co.uk, example.com, etc.)
+  if (DUMMY_DOMAINS.has(domain)) return false;
+
+  // Reject dummy local parts on generic domains
+  if (DUMMY_LOCAL_PREFIXES.has(local)) return false;
+
+  // Reject compliance / GDPR / DPO / unsubscribe / noreply emails
+  if (filterCompliance && COMPLIANCE_LOCAL_REGEX.test(local)) return false;
+
   return true;
 }
 
-function normalizeAndExtractEmails(rawText) {
+function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   if (!rawText || typeof rawText !== "string") return [];
 
   const found = new Set();
@@ -186,7 +231,7 @@ function normalizeAndExtractEmails(rawText) {
     if (!candidate) return;
     let c = candidate.trim().toLowerCase();
     c = c.replace(/^[<(\["']+|[>)\]"',;:.!]+$/g, "");
-    if (isValidEmail(c)) {
+    if (isValidEmail(c, filterCompliance)) {
       found.add(c);
     }
   }
@@ -234,11 +279,12 @@ function normalizeAndExtractEmails(rawText) {
   deobfuscated = deobfuscated.replace(/<span[^>]*>([a-zA-Z0-9._%+-]+)<\/span>\s*@\s*<span[^>]*>([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})<\/span>/gi, "$1@$2");
 
   // 7. Human text obfuscation: [at], (at), {at}, AT, [dot], (dot), {dot}, DOT (handles multi-level domains)
+  // NEVER replace bare lowercase 'at' or 'dot' as that corrupts English sentences like "viewed at www..." or "...or at all. It..."
   deobfuscated = deobfuscated
-    .replace(/\s*(?:\[at\]|\(at\)|\{at\}|\[AT\]|\(AT\))\s*/g, "@")
-    .replace(/\s*(?:\[dot\]|\(dot\)|\{dot\}|\[DOT\]|\(DOT\))\s*/g, ".")
-    .replace(/\b([a-zA-Z0-9._%+-]+)\s+(?:at|AT)\s+([a-zA-Z0-9.-]+)\b/g, "$1@$2")
-    .replace(/\b([a-zA-Z0-9-]+)\s+(?:dot|DOT)\s+([a-zA-Z]{2,24})\b/g, "$1.$2");
+    .replace(/\s*(?:\[at\]|\(at\)|\{at\}|\[AT\]|\(AT\)|_at_|\/\*at\*\/)\s*/g, "@")
+    .replace(/\s*(?:\[dot\]|\(dot\)|\{dot\}|\[DOT\]|\(DOT\)|_dot_|\/\*dot\*\/)\s*/g, ".")
+    .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})\b/g, "$1@$2")
+    .replace(/\b([a-zA-Z0-9-]+)\s+(?:DOT)\s+([a-zA-Z]{2,24})\b/g, "$1.$2");
 
   // 8. Spaced emails: "info @ company . com"
   deobfuscated = deobfuscated.replace(
@@ -246,8 +292,9 @@ function normalizeAndExtractEmails(rawText) {
     (_, localPart, domainPart) => `${localPart.replace(/\s+/g, "")}@${domainPart.replace(/\s+/g, "")}`
   );
 
-  // 8.5. Extract from raw HTML attributes: value="", content="", data-*, action="", placeholder="", alt="", title=""
-  const attrRegex = /\b(?:value|content|data-[a-z0-9_-]+|action|placeholder|alt|title)=["']([^"']+)["']/gi;
+  // 8.5. Extract from raw HTML attributes: value="", content="", data-*, action="", alt="", title=""
+  // (NOTE: EXCLUDE placeholder="" so dummy form placeholders like name@email.co.uk are never extracted!)
+  const attrRegex = /\b(?:value|content|data-[a-z0-9_-]+|action|alt|title)=["']([^"']+)["']/gi;
   let attrMatch;
   while ((attrMatch = attrRegex.exec(rawText)) !== null) {
     const val = attrMatch[1];
@@ -730,7 +777,8 @@ function emitEmailFound(finding) {
 }
 
 async function runProductionCrawl(crawlState) {
-  const { startUrl, maxPages, concurrency, checkPdfs, includeSubdomains, initialFindings, initialLinks } = crawlState;
+  const { startUrl, maxPages, concurrency, checkPdfs, includeSubdomains, initialFindings, initialLinks, filterCompliance: rawFilterCompliance } = crawlState;
+  const filterCompliance = rawFilterCompliance !== false;
   const startObj = new URL(startUrl);
   let baseOrigin = startObj.origin;
   let baseHostname = startObj.hostname;
@@ -770,7 +818,7 @@ async function runProductionCrawl(crawlState) {
   crawlState.visitedImages = visitedImages;
 
   function recordCleanEmail(email, sourceUrl, sourceType, mainPageUrl, extraMeta = {}) {
-    if (!email || !isValidEmail(email)) return;
+    if (!email || !isValidEmail(email, filterCompliance)) return;
     const cleanEmail = email.trim().toLowerCase();
     const existing = findingsMap.get(cleanEmail);
     const nowStr = new Date().toISOString();
@@ -1268,6 +1316,17 @@ async function runProductionCrawl(crawlState) {
     }
   }
 
+  // Sort findings: primary target-domain emails first, followed by others ordered by frequency
+  findings.sort((a, b) => {
+    const aDomain = (a.email.split("@")[1] || "").toLowerCase();
+    const bDomain = (b.email.split("@")[1] || "").toLowerCase();
+    const aMatches = baseHostname.includes(aDomain) || aDomain.includes(baseHostname);
+    const bMatches = baseHostname.includes(bDomain) || bDomain.includes(baseHostname);
+    if (aMatches && !bMatches) return -1;
+    if (!aMatches && bMatches) return 1;
+    return (b.occurrences || 1) - (a.occurrences || 1);
+  });
+
   emitProgress({
     pagesCrawled: visitedUrls.size,
     pdfsCrawled: visitedPdfs.size,
@@ -1305,6 +1364,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       concurrency: msg.concurrency || 8,
       checkPdfs: msg.checkPdfs !== false,
       ocrImages: msg.ocrImages !== false,
+      filterCompliance: msg.filterCompliance !== false,
       includeSubdomains: !!msg.includeSubdomains,
       initialFindings: msg.initialFindings || [],
       initialLinks: msg.initialLinks || [],

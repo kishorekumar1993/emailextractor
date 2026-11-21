@@ -26,6 +26,7 @@ const maxPagesSelect = document.getElementById("maxPagesSelect");
 const concurrencySelect = document.getElementById("concurrencySelect");
 const checkPdfsCheckbox = document.getElementById("checkPdfs");
 const ocrImagesCheckbox = document.getElementById("ocrImages");
+const filterComplianceCheckbox = document.getElementById("filterCompliance");
 const includeSubdomainsCheckbox = document.getElementById("includeSubdomains");
 const alwaysWindowModeCheckbox = document.getElementById("alwaysWindowMode");
 
@@ -99,6 +100,9 @@ function appendEmailRow(finding) {
 
 function registerFoundEmail(finding) {
   if (!finding || !finding.email) return;
+  const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
+  if (!isPopupValidEmail(finding.email, isStrict)) return;
+
   const normEmail = finding.email.toLowerCase();
   const idx = currentFindings.findIndex((f) => f.email.toLowerCase() === normEmail);
 
@@ -218,7 +222,29 @@ const POPUP_VALID_TLDS = new Set([
   "tw", "com.tw", "hk", "com.hk", "sg", "com.sg", "my", "kr", "br", "mx", "ae", "sa"
 ]);
 
-function isPopupValidEmail(email) {
+const POPUP_DUMMY_DOMAINS = new Set([
+  "email.com", "email.co.uk", "example.com", "example.org", "example.net", "example.co.uk",
+  "domain.com", "domain.co.uk", "sample.com", "sample.co.uk", "test.com", "test.co.uk", "testing.com",
+  "yourdomain.com", "yourcompany.com", "yoursite.com", "mycompany.com", "company.com", "site.com",
+  "website.com", "somedomain.com", "sentry.io", "wixpress.com", "wordpress.com", "cookiebot.com",
+  "onetrust.com", "cloudflare.com", "gravatar.com"
+]);
+
+const POPUP_DUMMY_LOCAL_PREFIXES = new Set([
+  "name", "yourname", "your-name", "your.name", "your_name", "your", "youremail", "your-email", "your.email",
+  "user", "username", "someone", "placeholder", "sample", "test", "testing", "first.last", "fullname",
+  "client", "recipient"
+]);
+
+const POPUP_COMPLIANCE_LOCAL_REGEX = /^(?:gdpr|dpo|dpo_.*|groupdpo|nomarketing|no-marketing|unsubscribe|optout|opt-out|noreply|no-reply|donotreply|do-not-reply|mailer-daemon|auto-reply|dataprotection|data-protection|cookie|cookies|abuse|postmaster|webmaster|hostmaster)$/i;
+
+const POPUP_INVALID_LOCAL_PARTS = new Set([
+  "or", "and", "the", "in", "at", "to", "for", "of", "on", "by", "as", "is", "it",
+  "an", "be", "if", "so", "my", "no", "up", "we", "he", "do", "viewed", "available",
+  "located", "registered", "hosted", "see", "look", "lookat", "held", "effective"
+]);
+
+function isPopupValidEmail(email, filterCompliance = true) {
   if (!email || typeof email !== "string") return false;
   const clean = email.trim().toLowerCase();
   if (clean.length < 5 || clean.length > 254) return false;
@@ -226,21 +252,39 @@ function isPopupValidEmail(email) {
   if (parts.length !== 2) return false;
   const [local, domain] = parts;
   if (!local || local.length < 1 || !domain || !domain.includes(".")) return false;
+
+  // Domain cannot start with www. or protocol prefix
+  if (domain.startsWith("www.") || domain.startsWith("http.") || domain.startsWith("https.") || domain.startsWith("ftp.")) {
+    return false;
+  }
+
+  // Reject invalid stop words or verbs as local parts (e.g. or@all.it, viewed@...)
+  if (POPUP_INVALID_LOCAL_PARTS.has(local)) return false;
+
+  // Reject dummy domains
+  if (POPUP_DUMMY_DOMAINS.has(domain)) return false;
+
+  // Reject dummy local parts on generic domains
+  if (POPUP_DUMMY_LOCAL_PREFIXES.has(local)) return false;
+
+  // Reject compliance / GDPR / DPO / unsubscribe emails
+  if (filterCompliance && POPUP_COMPLIANCE_LOCAL_REGEX.test(local)) return false;
+
   const tld = domain.split(".").pop();
   if (!POPUP_VALID_TLDS.has(tld) && !(tld.startsWith("xn--") && tld.length >= 5) && !/^[a-z]{2}$/.test(tld)) return false;
   return true;
 }
 
-function normalizeAndExtractEmails(rawText) {
+function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   if (!rawText || typeof rawText !== "string") return [];
   const found = new Set();
 
   let deobf = rawText
     .replace(/[©®]/g, "@")
-    .replace(/\s*(?:\[at\]|\(at\)|\{at\}|\[AT\]|\(AT\))\s*/g, "@")
-    .replace(/\s*(?:\[dot\]|\(dot\)|\{dot\}|\[DOT\]|\(DOT\))\s*/g, ".")
-    .replace(/\b([a-zA-Z0-9._%+-]+)\s+(?:at|AT)\s+([a-zA-Z0-9.-]+)\b/g, "$1@$2")
-    .replace(/\b([a-zA-Z0-9-]+)\s+(?:dot|DOT)\s+([a-zA-Z]{2,24})\b/g, "$1.$2")
+    .replace(/\s*(?:\[at\]|\(at\)|\{at\}|\[AT\]|\(AT\)|_at_|\/\*at\*\/)\s*/g, "@")
+    .replace(/\s*(?:\[dot\]|\(dot\)|\{dot\}|\[DOT\]|\(DOT\)|_dot_|\/\*dot\*\/)\s*/g, ".")
+    .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})\b/g, "$1@$2")
+    .replace(/\b([a-zA-Z0-9-]+)\s+(?:DOT)\s+([a-zA-Z]{2,24})\b/g, "$1.$2")
     .replace(/\b([a-zA-Z0-9._%+-]+(?:\s*\.\s*[a-zA-Z0-9._%+-]+)*)\s*@\s*([a-zA-Z0-9-]+(?:\s*\.\s*[a-zA-Z0-9-]+)*\s*\.\s*[a-zA-Z]{2,24})\b/g, (_, l, d) => `${l.replace(/\s+/g, "")}@${d.replace(/\s+/g, "")}`)
     .replace(/@([a-zA-Z0-9-]+),([a-zA-Z]{2,10})/g, "@$1.$2");
 
@@ -248,7 +292,7 @@ function normalizeAndExtractEmails(rawText) {
   const matches = deobf.match(regex) || [];
   for (let m of matches) {
     m = m.toLowerCase().replace(/^[<(\["']+|[>)\]"',;:.!]+$/g, "");
-    if (isPopupValidEmail(m)) {
+    if (isPopupValidEmail(m, filterCompliance)) {
       found.add(m);
     }
   }
@@ -510,6 +554,7 @@ startBtn.addEventListener("click", async () => {
       concurrency: parseInt(concurrencySelect.value, 10),
       checkPdfs: checkPdfsCheckbox.checked,
       ocrImages: ocrImagesCheckbox ? ocrImagesCheckbox.checked : true,
+      filterCompliance: filterComplianceCheckbox ? filterComplianceCheckbox.checked : true,
       includeSubdomains: includeSubdomainsCheckbox.checked,
       initialFindings,
       initialLinks
