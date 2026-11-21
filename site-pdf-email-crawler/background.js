@@ -604,14 +604,25 @@ async function runProductionCrawl(crawlState) {
     }
   }
 
+  const HIGH_VALUE_PDF_REGEX = /(?:catalog|katalog|brochure|prospekt|flyer|profile|company|about|contact|overview|presentation|cert|spec|product-list)/i;
+
   function enqueuePdf(rawPdfUrl, sourcePage) {
     if (!checkPdfs) return;
     const pdfUrl = cleanAndNormalizeUrl(rawPdfUrl, sourcePage);
     if (!pdfUrl) return;
     if (visitedPdfs.has(pdfUrl) || enqueuedPdfUrls.has(pdfUrl)) return;
 
+    const isHighValue = HIGH_VALUE_PDF_REGEX.test(pdfUrl);
+    // Cap low-value part drawings to max 25, while keeping high-value catalogs & brochures prioritized
+    if (enqueuedPdfUrls.size >= 25 && !isHighValue) return;
+
     enqueuedPdfUrls.add(pdfUrl);
-    pdfQueue.push({ url: pdfUrl, sourcePage: sourcePage || startUrl });
+    const item = { url: pdfUrl, sourcePage: sourcePage || startUrl };
+    if (isHighValue) {
+      pdfQueue.unshift(item);
+    } else {
+      pdfQueue.push(item);
+    }
   }
 
   // Ingest initial findings from active tab DOM harvest
@@ -736,7 +747,7 @@ async function runProductionCrawl(crawlState) {
       pagesCrawled: visitedUrls.size,
       pdfsCrawled: visitedPdfs.size,
       queueRemaining: htmlQueue.length + pdfQueue.length,
-      currentUrl,
+      currentUrl: mode === "pdf" ? `PDF: ${currentUrl.split("/").pop() || currentUrl}` : currentUrl,
       findingsCount: findings.length
     });
 
@@ -751,7 +762,7 @@ async function runProductionCrawl(crawlState) {
         const res = await fetch(currentUrl, {
           credentials: "omit",
           headers: PDF_FETCH_HEADERS,
-          signal: createFetchSignal(5000)
+          signal: createFetchSignal(3000)
         });
         if (!res.ok) return;
 
@@ -761,17 +772,12 @@ async function runProductionCrawl(crawlState) {
         const buffer = await res.arrayBuffer();
         if (buffer.byteLength < 50 || buffer.byteLength > 25 * 1024 * 1024) return;
 
-        // In-Memory scan: extracts digital emails from raw PDF streams in ~5ms
+        // In-Memory scan: extracts digital emails from raw PDF streams in < 5ms using native TextDecoder
         let extractedPdfEmails = [];
         try {
           const uint8 = new Uint8Array(buffer);
-          let binaryStr = "";
-          const chunkSize = 65536;
           const maxScanBytes = Math.min(uint8.length, 12 * 1024 * 1024);
-          for (let i = 0; i < maxScanBytes; i += chunkSize) {
-            const chunk = uint8.subarray(i, Math.min(i + chunkSize, maxScanBytes));
-            binaryStr += String.fromCharCode.apply(null, chunk);
-          }
+          const binaryStr = new TextDecoder("latin1").decode(uint8.subarray(0, maxScanBytes));
           extractedPdfEmails = normalizeAndExtractEmails(binaryStr);
         } catch {}
 
@@ -794,7 +800,7 @@ async function runProductionCrawl(crawlState) {
         const res = await fetch(currentUrl, {
           credentials: "omit",
           headers: STANDARD_FETCH_HEADERS,
-          signal: createFetchSignal(3500)
+          signal: createFetchSignal(2500)
         });
         if (!res.ok) return;
 
@@ -880,6 +886,9 @@ async function runProductionCrawl(crawlState) {
           continue;
         }
 
+        // Stop enqueuing more HTML pages if max limit is reached
+        if (visitedUrls.size >= maxPages) continue;
+
         const isPriority = HIGH_PRIORITY_REGEX.test(cleanUrl);
         const hardCap = isPriority ? Math.ceil(maxPages * 1.1) : maxPages;
         if (visitedUrls.size + htmlQueue.length < hardCap) {
@@ -905,9 +914,10 @@ async function runProductionCrawl(crawlState) {
 
     const maxPdfWorkers = Math.max(1, Math.min(4, Math.floor(poolSize / 3)));
 
-    // When maxPages reached, discard unprocessable HTML items immediately
-    if (visitedUrls.size >= maxPages && htmlQueue.length > 0) {
-      htmlQueue.length = 0;
+    // When maxPages reached, discard unprocessable HTML items and cap remaining PDFs
+    if (visitedUrls.size >= maxPages) {
+      if (htmlQueue.length > 0) htmlQueue.length = 0;
+      if (pdfQueue.length > 6) pdfQueue.length = 6;
     }
 
     // 1. PDF dispatch
@@ -941,7 +951,7 @@ async function runProductionCrawl(crawlState) {
         // Grace period check
         await new Promise((r) => setTimeout(r, 100));
         if (crawlState.aborted || allWorkCompleted) break;
-        if (htmlQueue.length > 0 || pdfQueue.length > 0) continue;
+        if ((htmlQueue.length > 0 && visitedUrls.size < maxPages) || (checkPdfs && pdfQueue.length > 0)) continue;
         if (activeWorkersCount > 0) continue;
 
         allWorkCompleted = true;
