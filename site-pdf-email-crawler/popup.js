@@ -152,11 +152,16 @@ searchInput.addEventListener("input", () => {
   renderEmailRows(filtered);
 });
 
-// Detect active browser tab
+// Detect active browser tab (excludes extension popup windows)
 async function detectActiveTab() {
   try {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    return tabs && tabs[0] ? tabs[0] : null;
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tabs && tabs[0] && tabs[0].url && !tabs[0].url.startsWith("chrome-extension://")) {
+      return tabs[0];
+    }
+    const allTabs = await chrome.tabs.query({ active: true });
+    const webTab = allTabs.find((t) => t.url && (t.url.startsWith("http://") || t.url.startsWith("https://")));
+    return webTab || (tabs && tabs[0] ? tabs[0] : null);
   } catch {
     return null;
   }
@@ -165,51 +170,6 @@ async function detectActiveTab() {
 async function detectActiveTabUrl() {
   const tab = await detectActiveTab();
   return tab && tab.url ? tab.url : "";
-}
-
-// Harvest live DOM from current tab
-async function harvestActiveTabDom(tabId) {
-  if (!tabId || typeof chrome.scripting === "undefined" || !chrome.scripting.executeScript) {
-    return { emails: [], links: [] };
-  }
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => {
-        const docText = document.body ? document.body.innerText || "" : "";
-        const docHtml = document.documentElement ? document.documentElement.outerHTML || "" : "";
-        const linkHrefs = [];
-        const links = document.querySelectorAll("a[href], [data-href], [data-url]");
-        links.forEach((el) => {
-          const href = el.getAttribute("href") || el.getAttribute("data-href") || el.getAttribute("data-url");
-          if (href) linkHrefs.push(href);
-        });
-        return {
-          text: docText.slice(0, 500000),
-          html: docHtml.slice(0, 1000000),
-          links: linkHrefs.slice(0, 500)
-        };
-      }
-    });
-
-    if (results && results[0] && results[0].result) {
-      const res = results[0].result;
-      const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24}/g;
-      const emails = [
-        ...new Set([
-          ...(res.text.match(emailRegex) || []),
-          ...(res.html.match(emailRegex) || [])
-        ])
-      ];
-      return {
-        emails,
-        links: res.links || []
-      };
-    }
-  } catch (err) {
-    console.debug("harvestActiveTabDom notice:", err);
-  }
-  return { emails: [], links: [] };
 }
 
 // ── Tesseract OCR Engine & Image Extraction ──────────────────────────
@@ -299,158 +259,38 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   return Array.from(found);
 }
 
-let ocrWorkerPromise = null;
-let ocrWorkerDisabled = false;
-async function getOcrWorker() {
-  if (ocrWorkerDisabled) return null;
-  if (!ocrWorkerPromise) {
-    ocrWorkerPromise = (async () => {
-      if (typeof Tesseract === "undefined") {
-        ocrWorkerDisabled = true;
-        return null;
-      }
-      try {
-        const worker = await Promise.race([
-          Tesseract.createWorker("eng", 1, {
-            workerPath: chrome.runtime.getURL("lib/worker.min.js"),
-            corePath: chrome.runtime.getURL("lib/"),
-            langPath: chrome.runtime.getURL("lib/"),
-            workerBlobURL: false,
-            errorHandler: () => {}
-          }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("Worker spawn timeout")), 3000))
-        ]);
-        return worker;
-      } catch (err) {
-        console.warn("OCR worker notice:", err);
-        ocrWorkerDisabled = true;
-        ocrWorkerPromise = null;
-        return null;
-      }
-    })();
-  }
-  return ocrWorkerPromise;
-}
-
-const imageOcrQueue = [];
 const processedImages = new Set();
-let isProcessingImages = false;
 
 function enqueueImageOcr(task) {
-  if (ocrWorkerDisabled) return;
   if (!task || !task.imageUrl || processedImages.has(task.imageUrl)) return;
-  if (!ocrImagesCheckbox || !ocrImagesCheckbox.checked) return;
-  if (imageOcrQueue.length >= 3) return;
-  imageOcrQueue.push(task);
-  processNextImageOcr();
-}
+  processedImages.add(task.imageUrl);
+  if (statImages) statImages.textContent = processedImages.size;
 
-async function processNextImageOcr() {
-  if (isProcessingImages || imageOcrQueue.length === 0 || ocrWorkerDisabled) return;
-  isProcessingImages = true;
-
-  try {
-    while (imageOcrQueue.length > 0 && isCrawling && !ocrWorkerDisabled) {
-      const task = imageOcrQueue.shift();
-      if (!task || processedImages.has(task.imageUrl)) continue;
-      processedImages.add(task.imageUrl);
-
-      if (statImages) statImages.textContent = processedImages.size;
-      if (ocrStatus) {
-        ocrStatus.style.display = "block";
-        ocrStatus.textContent = `🔍 OCR: Scanning image ${task.imageUrl.split("/").pop()}...`;
-      }
-
-      let objectUrl = null;
-      try {
-        const worker = await getOcrWorker();
-        if (!worker || ocrWorkerDisabled) break;
-
-        try {
-          const fetchRes = await fetch(task.imageUrl, { signal: AbortSignal.timeout(2000), credentials: "omit" });
-          if (fetchRes.ok) {
-            const blob = await fetchRes.blob();
-            objectUrl = URL.createObjectURL(blob);
-          }
-        } catch {}
-
-        const img = new Image();
-        if (objectUrl) {
-          img.src = objectUrl;
-        } else {
-          img.crossOrigin = "anonymous";
-          img.src = task.imageUrl;
-        }
-
-        await new Promise((resolve) => {
-          img.onload = resolve;
-          img.onerror = resolve;
-          setTimeout(resolve, 1500);
-        });
-
-        if (img.naturalWidth >= 30 && img.naturalHeight >= 15) {
-          const maxDim = 800;
-          let w = img.naturalWidth;
-          let h = img.naturalHeight;
-          if (w > maxDim || h > maxDim) {
-            if (w > h) { h = Math.round((h * maxDim) / w); w = maxDim; }
-            else { w = Math.round((w * maxDim) / h); h = maxDim; }
-          }
-
-          const canvas = document.createElement("canvas");
-          canvas.width = w;
-          canvas.height = h;
-          const ctx = canvas.getContext("2d");
-          ctx.drawImage(img, 0, 0, w, h);
-          const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
-
-          const result = await Promise.race([
-            worker.recognize(dataUrl),
-            new Promise((_, reject) => setTimeout(() => reject(new Error("OCR timeout")), 2500))
-          ]);
-
-          const ocrText = (result && result.data && result.data.text) ? result.data.text : "";
-          if (ocrText && ocrText.length > 3) {
-            const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
-            const foundEmails = normalizeAndExtractEmails(ocrText, isStrict);
-            for (const em of foundEmails) {
-              const item = {
-                copy: em.toLowerCase().trim(),
-                email: em.toLowerCase().trim(),
-                url: task.mainPageUrl,
-                pdf: null,
-                image: task.imageUrl,
-                sourceType: "image",
-                sourceUrl: task.imageUrl,
-                mainPageUrl: task.mainPageUrl,
-                occurrences: 1,
-                sources: [{
-                  sourceType: "image",
-                  sourceUrl: task.imageUrl,
-                  mainPageUrl: task.mainPageUrl,
-                  image: task.imageUrl,
-                  pdf: null,
-                  timestamp: new Date().toISOString()
-                }]
-              };
-              registerFoundEmail(item);
-              chrome.runtime.sendMessage({ type: "EMAIL_FOUND", finding: item }).catch(() => {});
-            }
-          }
-        }
-      } catch (err) {
-        console.debug("OCR notice on image:", task.imageUrl, err.message);
-      } finally {
-        if (objectUrl) {
-          URL.revokeObjectURL(objectUrl);
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, 60));
-    }
-  } finally {
-    isProcessingImages = false;
-    if (ocrStatus) ocrStatus.style.display = "none";
+  // Instant native extraction from image URL, alt, and title metadata
+  const combined = `${task.imageUrl} ${task.altText || ""} ${task.titleText || ""}`;
+  const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
+  const found = normalizeAndExtractEmails(combined, isStrict);
+  for (const em of found) {
+    const item = {
+      copy: em.toLowerCase().trim(),
+      email: em.toLowerCase().trim(),
+      url: task.mainPageUrl,
+      pdf: null,
+      image: task.imageUrl,
+      sourceType: "image",
+      sourceUrl: task.imageUrl,
+      mainPageUrl: task.mainPageUrl,
+      occurrences: 1,
+      sources: [{
+        sourceType: "image",
+        sourceUrl: task.imageUrl,
+        mainPageUrl: task.mainPageUrl,
+        image: task.imageUrl,
+        pdf: null,
+        timestamp: new Date().toISOString()
+      }]
+    };
+    registerFoundEmail(item);
   }
 }
 
@@ -498,11 +338,13 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 // ── Start Crawl Handler ──────────────────────────────────────────────
 startBtn.addEventListener("click", async () => {
-  const activeTabObj = await detectActiveTab();
   let targetUrl = targetUrlInput ? targetUrlInput.value.trim() : "";
-  if (!targetUrl && activeTabObj && activeTabObj.url) {
-    targetUrl = activeTabObj.url;
-    if (targetUrlInput) targetUrlInput.value = targetUrl;
+  if (!targetUrl || targetUrl.startsWith("chrome-extension://")) {
+    const activeTabObj = await detectActiveTab();
+    if (activeTabObj && activeTabObj.url && (activeTabObj.url.startsWith("http://") || activeTabObj.url.startsWith("https://"))) {
+      targetUrl = activeTabObj.url;
+      if (targetUrlInput) targetUrlInput.value = targetUrl;
+    }
   }
 
   if (!targetUrl || (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://"))) {
@@ -512,9 +354,7 @@ startBtn.addEventListener("click", async () => {
 
   currentFindings = [];
   emailRowsMap.clear();
-  imageOcrQueue.length = 0;
   processedImages.clear();
-  isProcessingImages = false;
   resultsBody.innerHTML = `<tr><td colspan="4" class="empty-state">Starting email crawl...</td></tr>`;
 
   statPages.textContent = "0";
@@ -533,46 +373,6 @@ startBtn.addEventListener("click", async () => {
   startBtn.style.display = "none";
   stopBtn.style.display = "inline-flex";
   isCrawling = true;
-  statusText.textContent = "Connecting to website and discovering pages...";
-
-  let initialFindings = [];
-  let initialLinks = [];
-
-  // Harvest DOM from currently active tab if URL matches (with 800ms timeout guard)
-  if (
-    activeTabObj &&
-    activeTabObj.id &&
-    activeTabObj.url &&
-    targetUrl.split("#")[0].replace(/\/$/, "") === activeTabObj.url.split("#")[0].replace(/\/$/, "")
-  ) {
-    statusText.textContent = "Harvesting live page elements & scripts...";
-    try {
-      const domHarvest = await Promise.race([
-        harvestActiveTabDom(activeTabObj.id),
-        new Promise((resolve) => setTimeout(() => resolve({ emails: [], links: [] }), 800))
-      ]);
-      if (domHarvest && Array.isArray(domHarvest.emails) && domHarvest.emails.length > 0) {
-        for (const em of domHarvest.emails) {
-          const item = {
-            copy: em.toLowerCase().trim(),
-            email: em.toLowerCase().trim(),
-            url: targetUrl,
-            pdf: null,
-            image: null,
-            sourceType: "html",
-            sourceUrl: targetUrl,
-            mainPageUrl: targetUrl
-          };
-          registerFoundEmail(item);
-          initialFindings.push(item);
-        }
-      }
-      initialLinks = (domHarvest && domHarvest.links) || [];
-    } catch (e) {
-      console.debug("Live tab harvest skipped:", e);
-    }
-  }
-
   statusText.textContent = "Connecting to website and crawling pages...";
 
   chrome.runtime.sendMessage(
@@ -584,9 +384,7 @@ startBtn.addEventListener("click", async () => {
       checkPdfs: checkPdfsCheckbox.checked,
       ocrImages: !!(ocrImagesCheckbox && ocrImagesCheckbox.checked),
       filterCompliance: filterComplianceCheckbox ? filterComplianceCheckbox.checked : true,
-      includeSubdomains: includeSubdomainsCheckbox.checked,
-      initialFindings,
-      initialLinks
+      includeSubdomains: includeSubdomainsCheckbox.checked
     },
     (response) => {
       if (chrome.runtime.lastError) {
@@ -610,8 +408,6 @@ startBtn.addEventListener("click", async () => {
 // ── Stop Crawl Handler ───────────────────────────────────────────────
 stopBtn.addEventListener("click", () => {
   isCrawling = false;
-  imageOcrQueue.length = 0;
-  isProcessingImages = false;
   if (ocrStatus) ocrStatus.style.display = "none";
   startBtn.style.display = "inline-flex";
   stopBtn.style.display = "none";
@@ -794,13 +590,20 @@ function syncCrawlState(res) {
     statPdfs.textContent = res.pdfsChecked || 0;
   }
 
-  if (res.isCrawling || res.status === "running") {
+  if (res.isCrawling === true) {
     isCrawling = true;
     startBtn.style.display = "none";
     stopBtn.style.display = "inline-flex";
     statusText.textContent = "Crawling in progress...";
-  } else if (res.findings && res.findings.length > 0) {
-    statusText.textContent = `Extracted ${currentFindings.length} unique emails from ${statPages.textContent} pages & ${statPdfs.textContent} PDFs.`;
+  } else {
+    isCrawling = false;
+    startBtn.style.display = "inline-flex";
+    stopBtn.style.display = "none";
+    if (currentFindings.length > 0) {
+      statusText.textContent = `Extracted ${currentFindings.length} unique emails from ${statPages.textContent} pages & ${statPdfs.textContent} PDFs.`;
+    } else {
+      statusText.textContent = "Ready. Open website and click 'Crawl Website'.";
+    }
     updateActionButtons();
   }
 }

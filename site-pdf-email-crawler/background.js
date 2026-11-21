@@ -1449,11 +1449,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "GET_CRAWL_STATUS") {
-    if (activeCrawl) {
+    if (activeCrawl && activeCrawl.isCrawling) {
       sendResponse({
         ok: true,
-        isCrawling: !!activeCrawl.isCrawling,
-        aborted: !!activeCrawl.aborted,
+        isCrawling: true,
+        aborted: false,
         findings: activeCrawl.findings || [],
         stats: {
           pagesCrawled: activeCrawl.visitedUrls ? activeCrawl.visitedUrls.size : 0,
@@ -1479,7 +1479,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (saved) {
           sendResponse({
             ok: true,
-            isCrawling: saved.status === "running",
+            isCrawling: false,
             aborted: saved.status === "stopped",
             findings: saved.findings || [],
             stats: {
