@@ -35,7 +35,7 @@ const VALID_TLDS = new Set([
   "co.kr", "br", "com.br", "mx", "com.mx", "ar", "com.ar", "cl", "co", "com.co",
   "pe", "za", "co.za", "nz", "co.nz", "ae", "sa", "tr", "il", "co.il", "th",
   "co.th", "vn", "ph", "com.ph", "id", "co.id", "pk", "com.pk", "ng", "com.ng",
-  "eg", "ke", "asia", "lat", "africa", "swiss", "gmbh", "ltd", "inc", "corp"
+  "eg", "ke", "cy", "com.cy", "net.cy", "org.cy", "asia", "lat", "africa", "swiss", "gmbh", "ltd", "inc", "corp"
 ]);
 
 // Asset extensions that look like email endings but are file formats
@@ -89,8 +89,8 @@ const SKIP_EXT_REGEX = /\.(css|js|jsx|ts|tsx|map|json|xml|rss|atom|woff|woff2|tt
 // Paths to ignore (includes pure compliance, GDPR, cookie policy & terms pages)
 const IGNORE_PATH_REGEX = /\/(?:wp-includes|wp-json|xmlrpc\.php|cdn-cgi|cgi-bin|node_modules|\.well-known|privacy-policy|privacy|cookie-policy|cookie-notice|cookies|terms-of-use|terms-of-service|terms-and-conditions|terms|legal-notice|legal|disclaimer|imprint-privacy|impressum-datenschutz|gdpr|dpo)\b/i;
 
-// High priority contact, catalog, download, and about pages across all languages
-const HIGH_PRIORITY_REGEX = /(?:contact|about|enquiry|inquiry|reach-us|get-in-touch|support|feedback|connect|team|staff|office|location|imprint|impressum|profile|catalog|catalogue|katalog|download|brochure|cert|spec|company|video|animation|media|tour|corp|exhibition|聯絡|關於|簡介|型錄|下載|影片|影音)/i;
+// High priority contact, catalog, download, agent and about pages across all languages
+const HIGH_PRIORITY_REGEX = /(?:contact|about|enquiry|inquiry|reach-us|get-in-touch|support|feedback|connect|team|staff|office|location|imprint|impressum|profile|catalog|catalogue|katalog|download|brochure|cert|spec|company|video|animation|media|tour|corp|exhibition|agent|agents|distributor|distributors|dealer|dealers|representatives|rep|branch|partners|聯絡|關於|簡介|型錄|下載|影片|影音)/i;
 
 // Contact image keywords to identify banners, certificates, business cards, and contact graphics
 const CONTACT_IMAGE_KEYWORD_REGEX = /(?:contact|email|e-mail|mail|address|card|footer|header|banner|cert|certificate|duns|iso|reach|info|support|tel|phone|sales|service|corp|logo|letter|stamp|license|bizcard|vcard|about|inquiry|consult|agent|office|branch|touch|sign|badge|profile|brochure|catalog|qr|聯絡|信箱|郵件|名片|證書|證照|電話|諮詢)/i;
@@ -210,10 +210,10 @@ function isValidEmail(email, filterCompliance = true) {
     if (!/^[a-z0-9-]+$/.test(label)) return false;
   }
 
-  // TLD check: must be recognized TLD (rejects fake TLDs like .word, assets like .png)
+  // TLD check: must be recognized TLD or valid 2-letter country code (rejects fake TLDs like .word, assets like .png)
   const tld = domainLabels[domainLabels.length - 1];
   const isPunycode = tld.startsWith("xn--") && tld.length >= 5;
-  const isKnownTld = VALID_TLDS.has(tld);
+  const isKnownTld = VALID_TLDS.has(tld) || /^[a-z]{2}$/.test(tld);
   if (!isKnownTld && !isPunycode) return false;
 
   if (BAD_ASSET_EXTENSIONS.has(tld)) return false;

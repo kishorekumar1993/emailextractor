@@ -210,7 +210,7 @@ const POPUP_VALID_TLDS = new Set([
   "in", "co.in", "net.in", "org.in", "us", "uk", "co.uk", "org.uk", "ca", "au",
   "com.au", "de", "fr", "it", "es", "nl", "eu", "ru", "ch", "at", "be", "dk",
   "se", "no", "fi", "pl", "cz", "ie", "pt", "gr", "ro", "jp", "co.jp", "cn", "com.cn",
-  "tw", "com.tw", "hk", "com.hk", "sg", "com.sg", "my", "kr", "br", "mx", "ae", "sa"
+  "tw", "com.tw", "hk", "com.hk", "sg", "com.sg", "my", "kr", "br", "mx", "ae", "sa", "cy", "com.cy"
 ]);
 
 const POPUP_DUMMY_DOMAINS = new Set([
