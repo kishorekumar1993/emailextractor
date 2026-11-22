@@ -40,6 +40,8 @@ const pdfsBody = document.getElementById("pdfsBody");
 const imagesBody = document.getElementById("imagesBody");
 
 const targetUrlInput = document.getElementById("targetUrlInput");
+const pdfUrlInput = document.getElementById("pdfUrlInput");
+const scanPdfBtn = document.getElementById("scanPdfBtn");
 const detectTabBtn = document.getElementById("detectTabBtn");
 const maxPagesSelect = document.getElementById("maxPagesSelect");
 const concurrencySelect = document.getElementById("concurrencySelect");
@@ -60,6 +62,8 @@ let currentImages = [];
 const emailRowsMap = new Map();
 const pdfRowsMap = new Map();
 const imageRowsMap = new Map();
+const pdfOcrJobs = new Map();
+let pdfOcrQueue = Promise.resolve();
 let activeTab = "emails";
 let isCrawling = false;
 let statusPollTimer = null;
@@ -303,7 +307,10 @@ function appendPdfRow(pdfItem) {
     <td><a class="source-link" href="${escapeHtml(url)}" target="_blank" title="${escapeHtml(url)}">📄 <strong>${escapeHtml(fileName)}</strong></a></td>
     <td><a class="source-link" href="${escapeHtml(sourcePage)}" target="_blank" title="${escapeHtml(sourcePage)}">${escapeHtml(sourcePage)}</a></td>
     <td><span class="${badgeClass}">${escapeHtml(statusStr)}</span></td>
-    <td style="text-align: center;"><a class="btn-sm-action" href="${escapeHtml(url)}" download="${escapeHtml(fileName)}" target="_blank">📥 Download</a></td>
+    <td style="text-align: center;">
+      <a class="btn-sm-action" href="${escapeHtml(url)}" download="${escapeHtml(fileName)}" target="_blank">📥 Download</a>
+      <button class="btn-sm-action pdf-rescan-btn" type="button" data-pdf-url="${escapeHtml(url)}">🔍 OCR</button>
+    </td>
   `;
 
   if (existingTr) {
@@ -330,6 +337,129 @@ function renderPdfRows(items) {
   for (const item of items) {
     appendPdfRow(item);
   }
+}
+
+async function scanPdfPageImages(pdfUrl, pdfRecord) {
+  if (!globalThis.pdfjsLib || !globalThis.Tesseract) {
+    throw new Error("The local PDF/OCR libraries did not load. Reload the extension and try again.");
+  }
+  const strict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
+
+  const response = await fetch(pdfUrl, { credentials: "omit" });
+  if (!response.ok) throw new Error(`PDF download failed (HTTP ${response.status}).`);
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength < 50) throw new Error("The response is too small to be a valid PDF.");
+  if (buffer.byteLength > 25 * 1024 * 1024) throw new Error("The PDF exceeds the 25 MB scan limit.");
+
+  pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("lib/pdf.worker.min.js");
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(buffer),
+    isEvalSupported: false,
+    useSystemFonts: true
+  });
+  let pdf;
+  let worker;
+  let pagesFailed = 0;
+  const emails = new Set();
+  try {
+    pdf = await loadingTask.promise;
+    const pagesToScan = Math.min(pdf.numPages, 50);
+    worker = await Tesseract.createWorker("eng", 1, {
+      workerPath: chrome.runtime.getURL("lib/worker.min.js"),
+      corePath: chrome.runtime.getURL("lib/tesseract-core-simd-lstm.wasm.js"),
+      langPath: chrome.runtime.getURL("lib"),
+      gzip: false
+    });
+    if (worker.load) await worker.load();
+    if (worker.loadLanguage) await worker.loadLanguage("eng");
+    if (worker.initialize) await worker.initialize("eng");
+
+    for (let pageNumber = 1; pageNumber <= pagesToScan; pageNumber++) {
+      let page;
+      try {
+        page = await pdf.getPage(pageNumber);
+        const content = await page.getTextContent();
+        const pageText = (content.items || [])
+          .filter((item) => typeof item.str === "string")
+          .map((item) => item.str)
+          .join(" ");
+        const pageEmails = normalizeAndExtractEmails(pageText, strict);
+        for (const email of pageEmails) emails.add(email);
+        if (pageEmails.length === 0) {
+          const viewport = page.getViewport({ scale: 1.75 });
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.ceil(viewport.width);
+          canvas.height = Math.ceil(viewport.height);
+          const context = canvas.getContext("2d", { willReadFrequently: true });
+          if (!context) throw new Error("Could not create a canvas for OCR.");
+          await page.render({ canvasContext: context, viewport }).promise;
+          const result = await worker.recognize(canvas);
+          for (const email of normalizeAndExtractEmails(result.data && result.data.text, strict)) {
+            emails.add(email);
+          }
+          canvas.width = 0;
+          canvas.height = 0;
+        }
+      } catch (error) {
+        pagesFailed++;
+        console.debug(`PDF OCR could not scan page ${pageNumber}:`, error);
+      } finally {
+        if (page) page.cleanup();
+      }
+      statusText.textContent = `Scanning PDF page ${pageNumber}/${pagesToScan} with text extraction and OCR...`;
+    }
+
+    const targetDomain = getCleanTargetDomain();
+    const found = Array.from(emails).filter((email) => {
+      if (!isPopupValidEmail(email, strict)) return false;
+      if (!onlyDomainEmailsCheckbox || !onlyDomainEmailsCheckbox.checked || !targetDomain) return true;
+      const domain = email.split("@")[1];
+      return domain === targetDomain || domain.endsWith("." + targetDomain) || targetDomain.endsWith("." + domain);
+    });
+
+    for (const email of found) {
+      registerFoundEmail({
+        copy: email,
+        email,
+        url: pdfUrl,
+        pdf: pdfUrl,
+        sourceType: "pdf",
+        sourceUrl: pdfUrl,
+        mainPageUrl: pdfUrl,
+        occurrences: 1,
+        sources: [{
+          sourceType: "pdf",
+          sourceUrl: pdfUrl,
+          mainPageUrl: pdfUrl,
+          pdf: pdfUrl,
+          timestamp: new Date().toISOString()
+        }]
+      });
+    }
+
+    const pageNote = pagesToScan < pdf.numPages ? `; scanned ${pagesToScan}/${pdf.numPages} pages` : "";
+    const failureNote = pagesFailed ? `; ${pagesFailed} pages failed` : "";
+    pdfRecord.status = `OCR scanned (${found.length} emails${pageNote}${failureNote})`;
+    pdfRecord.emailsFound = found.length;
+    appendPdfRow(pdfRecord);
+    updateActionButtons();
+    return { emails: found, pagesToScan, totalPages: pdf.numPages, pagesFailed };
+  } finally {
+    if (worker) await worker.terminate();
+    if (pdf) await pdf.destroy();
+    else if (loadingTask.destroy) await loadingTask.destroy();
+  }
+}
+
+function runPdfOcr(pdfUrl, pdfRecord) {
+  const existingJob = pdfOcrJobs.get(pdfUrl);
+  if (existingJob) return existingJob;
+  const job = pdfOcrQueue.then(() => scanPdfPageImages(pdfUrl, pdfRecord)).finally(() => {
+    pdfOcrJobs.delete(pdfUrl);
+  });
+  pdfOcrJobs.set(pdfUrl, job);
+  pdfOcrQueue = job.catch(() => {});
+  return job;
 }
 
 function appendImageRow(imageItem) {
@@ -441,15 +571,6 @@ async function detectActiveTabUrl() {
 }
 
 // ── Tesseract OCR Engine & Image Extraction ──────────────────────────
-const POPUP_VALID_TLDS = new Set([
-  "com", "net", "org", "edu", "gov", "mil", "int", "io", "co", "ai", "app", "dev",
-  "info", "biz", "me", "tv", "cc", "xyz", "online", "site", "tech", "store", "shop",
-  "in", "co.in", "net.in", "org.in", "us", "uk", "co.uk", "org.uk", "ca", "au",
-  "com.au", "de", "fr", "it", "es", "nl", "eu", "ru", "ch", "at", "be", "dk",
-  "se", "no", "fi", "pl", "cz", "ie", "pt", "gr", "ro", "jp", "co.jp", "cn", "com.cn",
-  "tw", "com.tw", "hk", "com.hk", "sg", "com.sg", "my", "kr", "br", "mx", "ae", "sa", "cy", "com.cy"
-]);
-
 const POPUP_DUMMY_DOMAINS = new Set([
   "email.com", "email.co.uk", "example.com", "example.org", "example.net", "example.co.uk",
   "domain.com", "domain.co.uk", "sample.com", "sample.co.uk", "test.com", "test.co.uk", "testing.com",
@@ -460,17 +581,10 @@ const POPUP_DUMMY_DOMAINS = new Set([
 
 const POPUP_DUMMY_LOCAL_PREFIXES = new Set([
   "name", "yourname", "your-name", "your.name", "your_name", "your", "youremail", "your-email", "your.email",
-  "user", "username", "someone", "placeholder", "sample", "test", "testing", "first.last", "fullname",
-  "client", "recipient"
+  "someone", "placeholder", "sample", "test", "testing", "first.last", "fullname"
 ]);
 
 const POPUP_COMPLIANCE_LOCAL_REGEX = /^(?:gdpr|dpo|dpo_.*|groupdpo|nomarketing|no-marketing|unsubscribe|optout|opt-out|noreply|no-reply|donotreply|do-not-reply|mailer-daemon|auto-reply|dataprotection|data-protection|cookie|cookies|abuse|postmaster|webmaster|hostmaster)$/i;
-
-const POPUP_INVALID_LOCAL_PARTS = new Set([
-  "or", "and", "the", "in", "at", "to", "for", "of", "on", "by", "as", "is", "it",
-  "an", "be", "if", "so", "my", "no", "up", "we", "he", "do", "viewed", "available",
-  "located", "registered", "hosted", "see", "look", "lookat", "held", "effective"
-]);
 
 function isPopupValidEmail(email, filterCompliance = true) {
   if (!email || typeof email !== "string") return false;
@@ -486,9 +600,6 @@ function isPopupValidEmail(email, filterCompliance = true) {
     return false;
   }
 
-  // Reject invalid stop words or verbs as local parts (e.g. or@all.it, viewed@...)
-  if (POPUP_INVALID_LOCAL_PARTS.has(local)) return false;
-
   // Reject dummy domains
   if (POPUP_DUMMY_DOMAINS.has(domain)) return false;
 
@@ -499,7 +610,7 @@ function isPopupValidEmail(email, filterCompliance = true) {
   if (filterCompliance && POPUP_COMPLIANCE_LOCAL_REGEX.test(local)) return false;
 
   const tld = domain.split(".").pop();
-  if (!POPUP_VALID_TLDS.has(tld) && !(tld.startsWith("xn--") && tld.length >= 5) && !/^[a-z]{2}$/.test(tld)) return false;
+  if (!(tld.startsWith("xn--") && tld.length >= 5) && !/^[a-z]{2,63}$/.test(tld)) return false;
   return true;
 }
 
@@ -513,13 +624,13 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
     .replace(/[©®]/g, "@")
     .replace(/\s*(?:\[at\]|\(at\)|\{at\}|\[AT\]|\(AT\)|_at_|\/\*at\*\/)\s*/g, "@")
     .replace(/\s*(?:\[dot\]|\(dot\)|\{dot\}|\[DOT\]|\(DOT\)|_dot_|\/\*dot\*\/)\s*/g, ".")
-    .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})\b/g, "$1@$2")
-    .replace(/\b([a-zA-Z0-9-]+)\s+(?:DOT)\s+([a-zA-Z]{2,24})\b/g, "$1.$2")
-    .replace(/\b([a-zA-Z0-9_%+-]{1,40})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z]{2,24})\b/g, "$1@$2.$3")
-    .replace(/\b([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z]{2,24})\b/g, "$1.$2@$3.$4")
+    .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63})\b/g, "$1@$2")
+    .replace(/\b([a-zA-Z0-9-]+)\s+(?:DOT)\s+([a-zA-Z0-9-]{2,63})\b/g, "$1.$2")
+    .replace(/\b([a-zA-Z0-9_%+-]{1,40})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z0-9-]{2,63})\b/g, "$1@$2.$3")
+    .replace(/\b([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z0-9-]{2,63})\b/g, "$1.$2@$3.$4")
     .replace(/@([a-zA-Z0-9-]+),([a-zA-Z]{2,10})/g, "@$1.$2");
 
-  const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24}/g;
+  const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63}/g;
   const matches = deobf.match(regex) || [];
   for (let m of matches) {
     m = m.toLowerCase().replace(/^[<(\["']+|[>)\]"',;:.!]+$/g, "");
@@ -585,6 +696,15 @@ chrome.runtime.onMessage.addListener((msg) => {
       p.status = msg.status || p.status;
       p.emailsFound = msg.emailsFound !== undefined ? msg.emailsFound : p.emailsFound;
       appendPdfRow(p);
+      if (p.emailsFound === 0 && (/^Scanned \(0 emails/i.test(p.status) || /^Failed:/i.test(p.status))) {
+        runPdfOcr(p.url, p).then((result) => {
+          statusText.textContent = `PDF text/OCR scan completed. Found ${result.emails.length} email${result.emails.length === 1 ? "" : "s"}.`;
+        }).catch((error) => {
+          p.status = `OCR failed: ${error.message || "Unable to scan PDF."}`;
+          appendPdfRow(p);
+          statusText.textContent = p.status;
+        });
+      }
     }
   }
 
@@ -657,6 +777,105 @@ chrome.runtime.onMessage.addListener((msg) => {
     statusText.textContent = `Failed: ${msg.error || "Crawl Error"}`;
   }
 });
+
+if (pdfsBody) {
+  pdfsBody.addEventListener("click", async (event) => {
+    const button = event.target instanceof Element ? event.target.closest(".pdf-rescan-btn") : null;
+    if (!button) return;
+    const pdfUrl = button.dataset.pdfUrl;
+    const pdfRecord = currentPdfs.find((item) => item.url === pdfUrl);
+    if (!pdfRecord) return;
+
+    button.disabled = true;
+    pdfRecord.status = "OCR scanning...";
+    appendPdfRow(pdfRecord);
+    try {
+      const result = await runPdfOcr(pdfUrl, pdfRecord);
+      statusText.textContent = `PDF OCR scan completed. Found ${result.emails.length} email${result.emails.length === 1 ? "" : "s"}.`;
+    } catch (error) {
+      pdfRecord.status = `OCR failed: ${error.message || "Unable to scan PDF."}`;
+      appendPdfRow(pdfRecord);
+      statusText.textContent = pdfRecord.status;
+    } finally {
+      const row = pdfRowsMap.get(pdfUrl);
+      const nextButton = row && row.querySelector(".pdf-rescan-btn");
+      if (nextButton) nextButton.disabled = false;
+    }
+  });
+}
+
+// ── Direct PDF Link Scan ─────────────────────────────────────────────
+if (scanPdfBtn) {
+  scanPdfBtn.addEventListener("click", async () => {
+    let pdfUrl;
+    try {
+      const parsedUrl = new URL(pdfUrlInput.value.trim());
+      if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+        throw new Error("Enter a PDF link that starts with http:// or https://.");
+      }
+      pdfUrl = parsedUrl.toString();
+    } catch (error) {
+      statusText.textContent = error.message || "Enter a valid PDF link.";
+      return;
+    }
+
+    scanPdfBtn.disabled = true;
+    statusText.textContent = "Downloading and scanning the PDF link...";
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "SCAN_PDF_LINK",
+        url: pdfUrl,
+        filterCompliance: filterComplianceCheckbox ? filterComplianceCheckbox.checked : true,
+        onlyDomainEmails: !!(onlyDomainEmailsCheckbox && onlyDomainEmailsCheckbox.checked),
+        targetDomain: getCleanTargetDomain()
+      });
+      if (!response || !response.ok) {
+        let pdfRecord = currentPdfs.find((item) => item.url === pdfUrl);
+        if (!pdfRecord) {
+          pdfRecord = {
+            url: pdfUrl,
+            sourcePage: "Direct PDF link",
+            status: `Background scan failed: ${(response && response.error) || "No response from the scanner."}`,
+            emailsFound: 0,
+            timestamp: new Date().toISOString()
+          };
+          currentPdfs.push(pdfRecord);
+        }
+        appendPdfRow(pdfRecord);
+        setActiveTab("pdfs");
+        const ocrResult = await runPdfOcr(pdfUrl, pdfRecord);
+        statusText.textContent = `PDF text/OCR scan completed. Found ${ocrResult.emails.length} email${ocrResult.emails.length === 1 ? "" : "s"}.`;
+        updateActionButtons();
+        return;
+      }
+
+      if (response.pdf) {
+        const existingPdf = currentPdfs.find((item) => item.url === response.pdf.url);
+        if (existingPdf) {
+          Object.assign(existingPdf, response.pdf);
+          appendPdfRow(existingPdf);
+        } else {
+          currentPdfs.push(response.pdf);
+          appendPdfRow(response.pdf);
+        }
+      }
+      for (const finding of response.findings || []) registerFoundEmail(finding);
+      setActiveTab("pdfs");
+      if ((response.findings || []).length === 0 && response.pdf) {
+        const pdfRecord = currentPdfs.find((item) => item.url === response.pdf.url);
+        const ocrResult = await runPdfOcr(response.pdf.url, pdfRecord);
+        statusText.textContent = `PDF text/OCR scan completed. Found ${ocrResult.emails.length} email${ocrResult.emails.length === 1 ? "" : "s"}.`;
+      } else {
+        statusText.textContent = `PDF scan completed. Found ${(response.findings || []).length} email${(response.findings || []).length === 1 ? "" : "s"}.`;
+      }
+      updateActionButtons();
+    } catch (error) {
+      statusText.textContent = `PDF scan failed: ${error.message || "Unable to contact the scanner."}`;
+    } finally {
+      scanPdfBtn.disabled = false;
+    }
+  });
+}
 
 // ── Start Crawl Handler ──────────────────────────────────────────────
 startBtn.addEventListener("click", async () => {
@@ -1064,6 +1283,17 @@ function syncCrawlState(res) {
       }
     }
     renderPdfRows(currentPdfs);
+    for (const pdf of currentPdfs) {
+      if (pdf.emailsFound === 0 && (/^Scanned \(0 emails/i.test(pdf.status || "") || /^Failed:/i.test(pdf.status || ""))) {
+        runPdfOcr(pdf.url, pdf).then((result) => {
+          statusText.textContent = `PDF text/OCR scan completed. Found ${result.emails.length} email${result.emails.length === 1 ? "" : "s"}.`;
+        }).catch((error) => {
+          pdf.status = `OCR failed: ${error.message || "Unable to scan PDF."}`;
+          appendPdfRow(pdf);
+          statusText.textContent = pdf.status;
+        });
+      }
+    }
   }
 
   if (Array.isArray(res.discoveredImages) && res.discoveredImages.length > 0) {

@@ -542,6 +542,14 @@
     </div>
   </div>
 
+  <div class="target-url-container">
+    <label for="pdfUrlInput" class="target-url-label">📄 Scan a PDF link directly (separate from website crawling):</label>
+    <div class="target-url-row">
+      <input type="text" id="pdfUrlInput" class="target-url-input" placeholder="https://example.com/catalog.pdf" />
+      <button id="scanPdfBtn" class="btn-secondary" style="white-space: nowrap;">Scan PDF Link</button>
+    </div>
+  </div>
+
   <div class="options-grid">
     <div class="option-group">
       <label for="maxPagesSelect">Crawl Scope / Max Pages</label>
@@ -665,7 +673,7 @@
           <th style="width: 40%;">Direct PDF Document Link</th>
           <th style="width: 36%;">Found On (Page URL)</th>
           <th style="width: 14%;">Scan Status</th>
-          <th style="width: 10%; text-align: center;">Download</th>
+          <th style="width: 10%; text-align: center;">Actions</th>
         </tr>
       </thead>
       <tbody id="pdfsBody">
@@ -695,6 +703,8 @@
     </table>
   </div>
 
+  <script src="lib/pdf.min.js"></script>
+  <script src="lib/tesseract.min.js"></script>
   <script src="popup.js"></script>
 </body>
 

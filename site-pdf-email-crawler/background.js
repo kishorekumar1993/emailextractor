@@ -21,23 +21,6 @@ const PDF_FETCH_HEADERS = {
   "Cache-Control": "no-cache"
 };
 
-// Recognized ICANN Top-Level Domains (TLDs)
-const VALID_TLDS = new Set([
-  "com", "net", "org", "edu", "gov", "mil", "int", "io", "co", "ai", "app", "dev",
-  "info", "biz", "me", "tv", "cc", "mobi", "name", "pro", "xyz", "online", "site",
-  "tech", "store", "shop", "club", "space", "design", "agency", "digital", "group",
-  "world", "live", "global", "solutions", "services", "expert", "company", "media",
-  "in", "co.in", "net.in", "org.in", "us", "uk", "co.uk", "org.uk", "me.uk", "ca",
-  "au", "com.au", "net.au", "org.au", "de", "fr", "it", "es", "nl", "eu", "ru",
-  "ch", "at", "be", "dk", "se", "no", "fi", "pl", "cz", "ie", "pt", "gr", "ro",
-  "hu", "bg", "hr", "sk", "si", "lt", "lv", "ee", "jp", "co.jp", "cn", "com.cn",
-  "tw", "com.tw", "idv.tw", "hk", "com.hk", "sg", "com.sg", "my", "com.my", "kr",
-  "co.kr", "br", "com.br", "mx", "com.mx", "ar", "com.ar", "cl", "co", "com.co",
-  "pe", "za", "co.za", "nz", "co.nz", "ae", "sa", "tr", "il", "co.il", "th",
-  "co.th", "vn", "ph", "com.ph", "id", "co.id", "pk", "com.pk", "ng", "com.ng",
-  "eg", "ke", "cy", "com.cy", "net.cy", "org.cy", "asia", "lat", "africa", "swiss", "gmbh", "ltd", "inc", "corp"
-]);
-
 // Asset extensions that look like email endings but are file formats
 const BAD_ASSET_EXTENSIONS = new Set([
   "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tiff", "tif",
@@ -69,19 +52,11 @@ const DUMMY_DOMAINS = new Set([
 // Dummy local prefixes in web templates
 const DUMMY_LOCAL_PREFIXES = new Set([
   "name", "yourname", "your-name", "your.name", "your_name", "your", "youremail", "your-email", "your.email",
-  "user", "username", "someone", "placeholder", "sample", "test", "testing", "first.last", "fullname",
-  "client", "recipient"
+  "someone", "placeholder", "sample", "test", "testing", "first.last", "fullname"
 ]);
 
 // Compliance, GDPR, DPO, legal notices & automated daemon emails
 const COMPLIANCE_LOCAL_REGEX = /^(?:gdpr|dpo|dpo_.*|groupdpo|nomarketing|no-marketing|unsubscribe|optout|opt-out|noreply|no-reply|donotreply|do-not-reply|mailer-daemon|auto-reply|dataprotection|data-protection|cookie|cookies|abuse|postmaster|webmaster|hostmaster)$/i;
-
-// English stop words and verbs that falsely trigger on bare text de-obfuscation
-const INVALID_LOCAL_PARTS = new Set([
-  "or", "and", "the", "in", "at", "to", "for", "of", "on", "by", "as", "is", "it",
-  "an", "be", "if", "so", "my", "no", "up", "we", "he", "do", "viewed", "available",
-  "located", "registered", "hosted", "see", "look", "lookat", "held", "effective"
-]);
 
 // File extensions to skip during HTML page crawling
 const SKIP_EXT_REGEX = /\.(css|js|jsx|ts|tsx|map|json|xml|rss|atom|woff|woff2|ttf|eot|otf|mp4|webm|ogv|avi|mov|mp3|ogg|wav|flac|aac|zip|tar|gz|bz2|rar|7z|dmg|exe|msi|bin|iso|apk|ipa|wasm|jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif)$/i;
@@ -196,9 +171,6 @@ function isValidEmail(email, filterCompliance = true) {
   if (!/^[a-z0-9](?:[a-z0-9._%+-]*[a-z0-9])?$/.test(local)) return false;
   if (local.includes("..")) return false;
 
-  // Reject common English prepositions/verbs/stop words that falsely match sentences (e.g. or@all.it, viewed@...)
-  if (INVALID_LOCAL_PARTS.has(local)) return false;
-
   // Domain checks
   if (!domain.includes(".") || domain.startsWith(".") || domain.endsWith(".")) return false;
   const domainLabels = domain.split(".");
@@ -210,11 +182,11 @@ function isValidEmail(email, filterCompliance = true) {
     if (!/^[a-z0-9-]+$/.test(label)) return false;
   }
 
-  // TLD check: must be recognized TLD or valid 2-letter country code (rejects fake TLDs like .word, assets like .png)
+  // Allow current and future alphabetic TLDs; asset suffixes are filtered separately.
   const tld = domainLabels[domainLabels.length - 1];
   const isPunycode = tld.startsWith("xn--") && tld.length >= 5;
-  const isKnownTld = VALID_TLDS.has(tld) || /^[a-z]{2}$/.test(tld);
-  if (!isKnownTld && !isPunycode) return false;
+  const isAlphabeticTld = /^[a-z]{2,63}$/.test(tld);
+  if (!isAlphabeticTld && !isPunycode) return false;
 
   if (BAD_ASSET_EXTENSIONS.has(tld)) return false;
   if (DUMMY_EMAILS.has(clean)) return false;
@@ -222,7 +194,7 @@ function isValidEmail(email, filterCompliance = true) {
   // Reject dummy domains (email.com, email.co.uk, example.com, etc.)
   if (DUMMY_DOMAINS.has(domain)) return false;
 
-  // Reject dummy local parts on generic domains
+  // Ignore obvious form placeholders, but allow functional mailboxes like user@ or client@.
   if (DUMMY_LOCAL_PREFIXES.has(local)) return false;
 
   // Reject compliance / GDPR / DPO / unsubscribe / noreply emails
@@ -270,7 +242,7 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   }
 
   // 3. ROT13 obfuscated emails
-  const rot13Regex = /\b(?:rot13|nqqerff)\s*[:=]\s*['"]([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})['"]/gi;
+  const rot13Regex = /\b(?:rot13|nqqerff)\s*[:=]\s*['"]([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63})['"]/gi;
   let r13Match;
   while ((r13Match = rot13Regex.exec(rawText)) !== null) {
     const dec = decodeRot13(r13Match[1]);
@@ -288,24 +260,24 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   deobfuscated = deobfuscated.replace(/<!--[\s\S]*?-->/g, "");
 
   // 6. Split elements (e.g. <span class="u">sales</span>@<span class="d">company.com</span>)
-  deobfuscated = deobfuscated.replace(/<span[^>]*>([a-zA-Z0-9._%+-]+)<\/span>\s*@\s*<span[^>]*>([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})<\/span>/gi, "$1@$2");
+  deobfuscated = deobfuscated.replace(/<span[^>]*>([a-zA-Z0-9._%+-]+)<\/span>\s*@\s*<span[^>]*>([a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63})<\/span>/gi, "$1@$2");
 
   // 7. Human text obfuscation: [at], (at), {at}, AT, [dot], (dot), {dot}, DOT (handles multi-level domains)
   // NEVER replace bare lowercase 'at' or 'dot' as that corrupts English sentences like "viewed at www..." or "...or at all. It..."
   deobfuscated = deobfuscated
     .replace(/\s*(?:\[at\]|\(at\)|\{at\}|\[AT\]|\(AT\)|_at_|\/\*at\*\/)\s*/g, "@")
     .replace(/\s*(?:\[dot\]|\(dot\)|\{dot\}|\[DOT\]|\(DOT\)|_dot_|\/\*dot\*\/)\s*/g, ".")
-    .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})\b/g, "$1@$2")
-    .replace(/\b([a-zA-Z0-9-]+)\s+(?:DOT)\s+([a-zA-Z]{2,24})\b/g, "$1.$2");
+    .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63})\b/g, "$1@$2")
+    .replace(/\b([a-zA-Z0-9-]+)\s+(?:DOT)\s+([a-zA-Z0-9-]{2,63})\b/g, "$1.$2");
 
   // 8. Spaced emails: "info @ company . com" (bounded, safe, no nested quantifiers)
   deobfuscated = deobfuscated.replace(
-    /\b([a-zA-Z0-9_%+-]{1,40})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z]{2,24})\b/g,
+    /\b([a-zA-Z0-9_%+-]{1,40})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z0-9-]{2,63})\b/g,
     "$1@$2.$3"
   );
   // Second pass for dotted local part e.g. "first . last @ domain . com" (safe bounded)
   deobfuscated = deobfuscated.replace(
-    /\b([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z]{2,24})\b/g,
+    /\b([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z0-9-]{2,63})\b/g,
     "$1.$2@$3.$4"
   );
 
@@ -328,7 +300,7 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   while ((svgMatch = svgTextRegex.exec(rawText)) !== null) {
     const val = svgMatch[1];
     if (val && val.includes("@")) {
-      const svgEmails = val.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24}/g) || [];
+      const svgEmails = val.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63}/g) || [];
       for (const em of svgEmails) checkAndAdd(em);
     }
   }
@@ -339,7 +311,7 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
     .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
     .replace(/<[^>]+>/g, " ");
 
-  const standardRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24}/g;
+  const standardRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63}/g;
   const matches = cleanText.match(standardRegex) || [];
   for (const m of matches) {
     checkAndAdd(m);
@@ -577,6 +549,123 @@ async function extractDeepPdfText(uint8) {
   }
 
   return combinedText;
+}
+
+function getPdfJsLibrary() {
+  if (!globalThis.pdfjsLib) {
+    importScripts("lib/pdf.min.js");
+  }
+  if (!globalThis.pdfjsLib || typeof globalThis.pdfjsLib.getDocument !== "function") {
+    throw new Error("The bundled PDF text parser could not be loaded.");
+  }
+  globalThis.pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("lib/pdf.worker.min.js");
+  return globalThis.pdfjsLib;
+}
+
+function extractPdfPageText(items) {
+  let text = "";
+  let previous = null;
+  for (const item of items) {
+    if (!item || typeof item.str !== "string" || !item.str) continue;
+    const transform = item.transform || [];
+    const x = Number(transform[4]) || 0;
+    const y = Number(transform[5]) || 0;
+    const fontSize = Math.abs(Number(transform[3]) || Number(transform[0]) || 10);
+    if (previous) {
+      const sameLine = Math.abs(y - previous.y) < Math.max(1, fontSize * 0.4);
+      const gap = x - (previous.x + previous.width);
+      text += item.hasEOL || !sameLine ? "\n" : (gap > fontSize * 0.15 ? " " : "");
+    }
+    text += item.str;
+    previous = { x, y, width: Number(item.width) || 0 };
+  }
+  return text;
+}
+
+async function extractEmailsFromPdfBytes(buffer, filterCompliance = true) {
+  let loadingTask;
+  let pdf;
+  try {
+    const pdfjs = getPdfJsLibrary();
+    loadingTask = pdfjs.getDocument({
+      data: new Uint8Array(buffer),
+      disableWorker: true,
+      isEvalSupported: false,
+      useSystemFonts: true,
+      verbosity: 0
+    });
+    pdf = await loadingTask.promise;
+    const annotationTexts = [];
+    const emails = new Set();
+    const pagesToScan = Math.min(pdf.numPages, 500);
+    let pagesFailed = 0;
+    for (let pageNumber = 1; pageNumber <= pagesToScan; pageNumber++) {
+      let page;
+      try {
+        page = await pdf.getPage(pageNumber);
+        const [textContent, annotations] = await Promise.all([
+          page.getTextContent(),
+          page.getAnnotations({ intent: "display" })
+        ]);
+        const pageText = extractPdfPageText(textContent.items || []);
+        for (const email of normalizeAndExtractEmails(pageText, filterCompliance)) {
+          emails.add(email);
+        }
+        for (const annotation of annotations) {
+          if (annotation.url) annotationTexts.push(annotation.url);
+          if (annotation.unsafeUrl) annotationTexts.push(annotation.unsafeUrl);
+        }
+      } catch (error) {
+        pagesFailed++;
+        console.debug(`Could not extract text from PDF page ${pageNumber}:`, error);
+      } finally {
+        if (page) page.cleanup();
+      }
+    }
+
+    for (const email of normalizeAndExtractEmails(annotationTexts.join("\n"), filterCompliance)) {
+      emails.add(email);
+    }
+    let usedFallback = false;
+
+    // Keep the low-level extractor as a fallback for malformed PDFs and encodings
+    // that PDF.js cannot decode, while preferring its Unicode text output.
+    if (emails.size === 0) {
+      usedFallback = true;
+      const fallbackText = await extractDeepPdfText(new Uint8Array(buffer));
+      for (const email of normalizeAndExtractEmails(fallbackText, filterCompliance)) {
+        emails.add(email);
+      }
+    }
+
+    return {
+      emails: Array.from(emails),
+      pagesScanned: pagesToScan,
+      totalPages: pdf.numPages,
+      pagesFailed,
+      usedFallback
+    };
+  } catch (error) {
+    console.debug("PDF.js text extraction failed; trying the basic PDF parser:", error);
+    const fallbackText = await extractDeepPdfText(new Uint8Array(buffer));
+    const emails = normalizeAndExtractEmails(fallbackText, filterCompliance);
+    if (emails.length === 0) throw error;
+    return { emails, pagesScanned: 0, totalPages: null, pagesFailed: 0, usedFallback: true };
+  } finally {
+    if (pdf) await pdf.destroy();
+    else if (loadingTask && loadingTask.destroy) await loadingTask.destroy();
+  }
+}
+
+function updatePdfRecord(pdfRecord, status, emailsFound = pdfRecord.emailsFound || 0) {
+  pdfRecord.status = status;
+  pdfRecord.emailsFound = emailsFound;
+  chrome.runtime.sendMessage({
+    type: "UPDATE_PDF_STATUS",
+    url: pdfRecord.url,
+    status,
+    emailsFound
+  }).catch(() => {});
 }
 
 function extractAllLinksAndMedia(html) {
@@ -879,7 +968,7 @@ function generateSisterDomains(domain) {
   return Array.from(candidates).slice(0, 6);
 }
 
-async function discoverSisterDomainEmails(startUrl, companyKeywords) {
+async function discoverSisterDomainEmails(startUrl, companyKeywords, filterCompliance = true) {
   try {
     const startObj = new URL(startUrl);
     const sisterDomains = generateSisterDomains(startObj.hostname);
@@ -903,7 +992,7 @@ async function discoverSisterDomainEmails(startUrl, companyKeywords) {
                 companyKeywords.length === 0 ||
                 companyKeywords.some((kw) => kw.length >= 4 && lowerHtml.includes(kw.toLowerCase()));
               if (matches) {
-                const extracted = normalizeAndExtractEmails(html);
+                const extracted = normalizeAndExtractEmails(html, filterCompliance);
                 for (const em of extracted) {
                   foundEmails.set(em, { email: em, sourceUrl: tUrl, domain });
                 }
@@ -1231,27 +1320,20 @@ async function runProductionCrawl(crawlState) {
           signal: createFetchSignal(9000)
         });
         if (!res.ok) {
-          console.debug("PDF response non-OK:", res.status, currentUrl);
-          return;
+          throw new Error(`HTTP ${res.status}`);
         }
 
         const contentType = (res.headers.get("content-type") || "").toLowerCase();
-        if (contentType.includes("text/html")) return;
+        if (contentType.includes("text/html")) {
+          throw new Error("The link returned an HTML page, not a PDF.");
+        }
 
         const buffer = await res.arrayBuffer();
-        if (buffer.byteLength < 50 || buffer.byteLength > 25 * 1024 * 1024) return;
+        if (buffer.byteLength < 50) throw new Error("The response is too small to be a valid PDF.");
+        if (buffer.byteLength > 25 * 1024 * 1024) throw new Error("The PDF exceeds the 25 MB scan limit.");
 
-        // Deep In-Memory PDF scan: scans uncompressed text + decompresses all FlateDecode streams in memory
-        let extractedPdfEmails = [];
-        try {
-          const uint8 = new Uint8Array(buffer);
-          const deepText = await extractDeepPdfText(uint8);
-          if (deepText && deepText.includes("@")) {
-            extractedPdfEmails = normalizeAndExtractEmails(deepText);
-          }
-        } catch (pdfErr) {
-          console.debug("PDF stream extraction error:", pdfErr);
-        }
+        const scan = await extractEmailsFromPdfBytes(buffer, filterCompliance);
+        const extractedPdfEmails = scan.emails;
 
         for (const em of extractedPdfEmails) {
           recordCleanEmail(em, currentUrl, "pdf", mainSitePage, { pdf: currentUrl, sourceType: "pdf" });
@@ -1259,26 +1341,22 @@ async function runProductionCrawl(crawlState) {
 
         const pdfRec = discoveredPdfs.find((p) => p.url === currentUrl);
         if (pdfRec) {
-          pdfRec.status = extractedPdfEmails.length > 0 ? `Scanned (${extractedPdfEmails.length} emails)` : "Scanned (0 emails)";
-          pdfRec.emailsFound = extractedPdfEmails.length;
-          chrome.runtime.sendMessage({
-            type: "UPDATE_PDF_STATUS",
-            url: currentUrl,
-            status: pdfRec.status,
-            emailsFound: pdfRec.emailsFound
-          }).catch(() => {});
+          const suffix = scan.usedFallback ? "; basic parser fallback" : "";
+          const pageNote = scan.totalPages && scan.pagesScanned < scan.totalPages
+            ? `; scanned ${scan.pagesScanned}/${scan.totalPages} pages`
+            : "";
+          const failureNote = scan.pagesFailed ? `; ${scan.pagesFailed} pages failed` : "";
+          updatePdfRecord(
+            pdfRec,
+            `Scanned (${extractedPdfEmails.length} emails${pageNote}${failureNote}${suffix})`,
+            extractedPdfEmails.length
+          );
         }
       } catch (err) {
-        console.debug("PDF fetch error:", currentUrl, err.message);
+        console.debug("PDF scan failed:", currentUrl, err.message);
         const pdfRec = discoveredPdfs.find((p) => p.url === currentUrl);
         if (pdfRec) {
-          pdfRec.status = "Failed";
-          chrome.runtime.sendMessage({
-            type: "UPDATE_PDF_STATUS",
-            url: currentUrl,
-            status: "Failed",
-            emailsFound: 0
-          }).catch(() => {});
+          updatePdfRecord(pdfRec, `Failed: ${err.message}`, 0);
         }
       }
     }
@@ -1343,8 +1421,8 @@ async function runProductionCrawl(crawlState) {
       }
 
       // Extract all emails from text, HTML source, and mailto links
-      const textMatches = normalizeAndExtractEmails(text);
-      const htmlMatches = normalizeAndExtractEmails(html);
+      const textMatches = normalizeAndExtractEmails(text, filterCompliance);
+      const htmlMatches = normalizeAndExtractEmails(html, filterCompliance);
       const allMatches = new Set([...textMatches, ...htmlMatches]);
       for (const m of allMatches) {
         recordCleanEmail(m, finalUrl, "html", finalUrl);
@@ -1375,7 +1453,7 @@ async function runProductionCrawl(crawlState) {
           // 1. Direct alt/title text inspection
           const combinedImgText = `${img.alt || ""} ${img.title || ""}`;
           if (combinedImgText.includes("@") || combinedImgText.includes("[at]")) {
-            const imgEmails = normalizeAndExtractEmails(combinedImgText);
+            const imgEmails = normalizeAndExtractEmails(combinedImgText, filterCompliance);
             for (const em of imgEmails) {
               recordCleanEmail(em, finalUrl, "image", finalUrl, { image: fullImgUrl, sourceType: "image" });
             }
@@ -1384,7 +1462,7 @@ async function runProductionCrawl(crawlState) {
           // Direct email in image filename or query
           if (fullImgUrl.includes("@") || /%40|_at_/i.test(fullImgUrl)) {
             try {
-              const urlEmails = normalizeAndExtractEmails(decodeURIComponent(fullImgUrl));
+              const urlEmails = normalizeAndExtractEmails(decodeURIComponent(fullImgUrl), filterCompliance);
               for (const em of urlEmails) {
                 recordCleanEmail(em, finalUrl, "image", finalUrl, { image: fullImgUrl, sourceType: "image" });
               }
@@ -1399,7 +1477,7 @@ async function runProductionCrawl(crawlState) {
                 .then((r) => (r.ok ? r.text() : ""))
                 .then((svgText) => {
                   if (svgText && svgText.includes("@")) {
-                    const svgEmails = normalizeAndExtractEmails(svgText);
+                    const svgEmails = normalizeAndExtractEmails(svgText, filterCompliance);
                     for (const em of svgEmails) {
                       recordCleanEmail(em, finalUrl, "image", finalUrl, { image: fullImgUrl, sourceType: "image" });
                     }
@@ -1434,7 +1512,7 @@ async function runProductionCrawl(crawlState) {
         if (rawLink.toLowerCase().startsWith("mailto:")) {
           try {
             const rawMailto = decodeURIComponent(rawLink);
-            const emailsInMailto = normalizeAndExtractEmails(rawMailto);
+            const emailsInMailto = normalizeAndExtractEmails(rawMailto, filterCompliance);
             for (const em of emailsInMailto) {
               recordCleanEmail(em, finalUrl, "html", finalUrl);
             }
@@ -1612,7 +1690,8 @@ async function runProductionCrawl(crawlState) {
         (async () => {
           const fallbackList = await discoverSisterDomainEmails(
             startUrl,
-            Array.from(discoveredCompanyKeywords)
+            Array.from(discoveredCompanyKeywords),
+            filterCompliance
           );
           for (const item of fallbackList) {
             recordCleanEmail(item.email, item.sourceUrl, "html", item.sourceUrl, {
@@ -1659,6 +1738,89 @@ async function runProductionCrawl(crawlState) {
 // ═══════════════════════════════════════════════════════════════════════
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === "SCAN_PDF_LINK") {
+    let pdfUrl;
+    try {
+      const parsedUrl = new URL(msg.url);
+      if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+        throw new Error("Enter a PDF link that starts with http:// or https://.");
+      }
+      pdfUrl = parsedUrl.toString();
+    } catch (error) {
+      sendResponse({ ok: false, error: error.message || "Enter a valid PDF link." });
+      return false;
+    }
+
+    const pdfRecord = {
+      url: pdfUrl,
+      sourcePage: "Direct PDF link",
+      status: "Scanning",
+      emailsFound: 0,
+      timestamp: new Date().toISOString()
+    };
+    chrome.runtime.sendMessage({ type: "PDF_DISCOVERED", pdf: pdfRecord }).catch(() => {});
+
+    (async () => {
+      const res = await fetch(pdfUrl, {
+        credentials: "omit",
+        headers: PDF_FETCH_HEADERS
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const contentType = (res.headers.get("content-type") || "").toLowerCase();
+      if (contentType.includes("text/html")) {
+        throw new Error("The link returned an HTML page, not a PDF.");
+      }
+      const buffer = await res.arrayBuffer();
+      if (buffer.byteLength < 50) throw new Error("The response is too small to be a valid PDF.");
+      if (buffer.byteLength > 25 * 1024 * 1024) throw new Error("The PDF exceeds the 25 MB scan limit.");
+
+      const filterCompliance = msg.filterCompliance !== false;
+      const scan = await extractEmailsFromPdfBytes(buffer, filterCompliance);
+      const targetDomain = (msg.targetDomain || "").toLowerCase().replace(/^www\./, "");
+      const findings = scan.emails
+        .filter((email) => {
+          if (!msg.onlyDomainEmails || !targetDomain) return true;
+          const domain = email.split("@")[1];
+          return domain === targetDomain || domain.endsWith("." + targetDomain) || targetDomain.endsWith("." + domain);
+        })
+        .map((email) => ({
+          copy: email,
+          email,
+          url: pdfUrl,
+          pdf: pdfUrl,
+          sourceType: "pdf",
+          sourceUrl: pdfUrl,
+          mainPageUrl: pdfUrl,
+          occurrences: 1,
+          sources: [{
+            sourceType: "pdf",
+            sourceUrl: pdfUrl,
+            mainPageUrl: pdfUrl,
+            pdf: pdfUrl,
+            timestamp: new Date().toISOString()
+          }]
+        }));
+
+      for (const finding of findings) emitEmailFound(finding);
+      const fallbackNote = scan.usedFallback ? "; basic parser fallback" : "";
+      const pageNote = scan.totalPages && scan.pagesScanned < scan.totalPages
+        ? `; scanned ${scan.pagesScanned}/${scan.totalPages} pages`
+        : "";
+      const failureNote = scan.pagesFailed ? `; ${scan.pagesFailed} pages failed` : "";
+      updatePdfRecord(
+        pdfRecord,
+        `Scanned (${findings.length} emails${pageNote}${failureNote}${fallbackNote})`,
+        findings.length
+      );
+      sendResponse({ ok: true, pdf: pdfRecord, findings });
+    })().catch((error) => {
+      console.debug("Direct PDF scan failed:", pdfUrl, error.message);
+      updatePdfRecord(pdfRecord, `Failed: ${error.message}`, 0);
+      sendResponse({ ok: false, error: error.message, pdf: pdfRecord });
+    });
+    return true;
+  }
+
   if (msg.type === "START_CRAWL") {
     if (activeCrawl && activeCrawl.isCrawling) {
       if (activeCrawl.abortController) {
