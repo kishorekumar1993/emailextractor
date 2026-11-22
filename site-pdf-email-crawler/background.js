@@ -590,8 +590,12 @@ async function extractEmailsFromPdfBytes(buffer, filterCompliance = true) {
     loadingTask = pdfjs.getDocument({
       data: new Uint8Array(buffer),
       disableWorker: true,
+      disableAutoFetch: true,
+      disableRange: true,
+      disableStream: true,
       isEvalSupported: false,
       useSystemFonts: true,
+      stopAtErrors: false,
       verbosity: 0
     });
     pdf = await loadingTask.promise;
@@ -1102,13 +1106,6 @@ async function runProductionCrawl(crawlState) {
   function recordCleanEmail(email, sourceUrl, sourceType, mainPageUrl, extraMeta = {}) {
     if (!email || !isValidEmail(email, filterCompliance)) return;
     const cleanEmail = email.trim().toLowerCase();
-
-    if (crawlState.onlyDomainEmails) {
-      const emailDomain = cleanEmail.split("@")[1];
-      const cleanBase = (baseHostname || "").toLowerCase().replace(/^www\./, "");
-      const isMatch = emailDomain === cleanBase || emailDomain.endsWith("." + cleanBase) || cleanBase.endsWith("." + emailDomain);
-      if (!isMatch) return;
-    }
 
     const existing = findingsMap.get(cleanEmail);
     const nowStr = new Date().toISOString();
@@ -1776,13 +1773,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       const filterCompliance = msg.filterCompliance !== false;
       const scan = await extractEmailsFromPdfBytes(buffer, filterCompliance);
-      const targetDomain = (msg.targetDomain || "").toLowerCase().replace(/^www\./, "");
       const findings = scan.emails
-        .filter((email) => {
-          if (!msg.onlyDomainEmails || !targetDomain) return true;
-          const domain = email.split("@")[1];
-          return domain === targetDomain || domain.endsWith("." + targetDomain) || targetDomain.endsWith("." + domain);
-        })
         .map((email) => ({
           copy: email,
           email,
