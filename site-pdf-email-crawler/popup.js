@@ -604,6 +604,19 @@ async function detectActiveTabUrl() {
 }
 
 // ── Tesseract OCR Engine & Image Extraction ──────────────────────────
+const POPUP_VALID_TLDS = new Set([
+  "com", "net", "org", "edu", "gov", "mil", "int", "io", "co", "ai", "app", "dev",
+  "info", "biz", "me", "tv", "cc", "mobi", "name", "pro", "xyz", "online", "site",
+  "tech", "store", "shop", "club", "space", "design", "agency", "digital", "group",
+  "world", "live", "global", "solutions", "services", "expert", "company", "media",
+  "asia", "africa", "swiss", "gmbh", "ltd", "inc", "corp", "email", "technology",
+  "in", "us", "uk", "ca", "au", "de", "fr", "it", "es", "nl", "eu", "ru", "ch",
+  "at", "be", "dk", "se", "no", "fi", "pl", "cz", "ie", "pt", "gr", "ro", "hu",
+  "bg", "hr", "sk", "si", "lt", "lv", "ee", "jp", "cn", "tw", "hk", "sg", "my",
+  "kr", "br", "mx", "ar", "cl", "pe", "za", "nz", "ae", "sa", "tr", "il", "th",
+  "vn", "ph", "id", "pk", "ng", "eg", "ke", "cy"
+]);
+
 const POPUP_DUMMY_DOMAINS = new Set([
   "email.com", "email.co.uk", "example.com", "example.org", "example.net", "example.co.uk",
   "domain.com", "domain.co.uk", "sample.com", "sample.co.uk", "test.com", "test.co.uk", "testing.com",
@@ -627,6 +640,11 @@ function isPopupValidEmail(email, filterCompliance = true) {
   if (parts.length !== 2) return false;
   const [local, domain] = parts;
   if (!local || local.length < 1 || !domain || !domain.includes(".")) return false;
+  if (!/^[a-z0-9](?:[a-z0-9._%+-]*[a-z0-9])?$/.test(local) || local.includes("..")) return false;
+  const labels = domain.split(".");
+  if (labels.some((label) => !label || label.length > 63 || label.startsWith("-") || label.endsWith("-") || !/^[a-z0-9-]+$/.test(label))) {
+    return false;
+  }
 
   // Domain cannot start with www. or protocol prefix
   if (domain.startsWith("www.") || domain.startsWith("http.") || domain.startsWith("https.") || domain.startsWith("ftp.")) {
@@ -643,7 +661,8 @@ function isPopupValidEmail(email, filterCompliance = true) {
   if (filterCompliance && POPUP_COMPLIANCE_LOCAL_REGEX.test(local)) return false;
 
   const tld = domain.split(".").pop();
-  if (!(tld.startsWith("xn--") && tld.length >= 5) && !/^[a-z]{2,63}$/.test(tld)) return false;
+  const isPunycode = tld.startsWith("xn--") && tld.length >= 5;
+  if (!POPUP_VALID_TLDS.has(tld) && !/^[a-z]{2}$/.test(tld) && !isPunycode) return false;
   return true;
 }
 
@@ -654,7 +673,6 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   const found = new Set();
 
   let deobf = rawText
-    .replace(/[©®]/g, "@")
     .replace(/\s*(?:\[at\]|\(at\)|\{at\}|\[AT\]|\(AT\)|_at_|\/\*at\*\/)\s*/g, "@")
     .replace(/\s*(?:\[dot\]|\(dot\)|\{dot\}|\[DOT\]|\(DOT\)|_dot_|\/\*dot\*\/)\s*/g, ".")
     .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63})\b/g, "$1@$2")

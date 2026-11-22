@@ -13,6 +13,19 @@ const STANDARD_FETCH_HEADERS = {
   "Pragma": "no-cache"
 };
 
+const VALID_TLDS = new Set([
+  "com", "net", "org", "edu", "gov", "mil", "int", "io", "co", "ai", "app", "dev",
+  "info", "biz", "me", "tv", "cc", "mobi", "name", "pro", "xyz", "online", "site",
+  "tech", "store", "shop", "club", "space", "design", "agency", "digital", "group",
+  "world", "live", "global", "solutions", "services", "expert", "company", "media",
+  "asia", "africa", "swiss", "gmbh", "ltd", "inc", "corp", "email", "technology",
+  "in", "us", "uk", "ca", "au", "de", "fr", "it", "es", "nl", "eu", "ru", "ch",
+  "at", "be", "dk", "se", "no", "fi", "pl", "cz", "ie", "pt", "gr", "ro", "hu",
+  "bg", "hr", "sk", "si", "lt", "lv", "ee", "jp", "cn", "tw", "hk", "sg", "my",
+  "kr", "br", "mx", "ar", "cl", "pe", "za", "nz", "ae", "sa", "tr", "il", "th",
+  "vn", "ph", "id", "pk", "ng", "eg", "ke", "cy"
+]);
+
 const PDF_FETCH_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -185,8 +198,8 @@ function isValidEmail(email, filterCompliance = true) {
   // Allow current and future alphabetic TLDs; asset suffixes are filtered separately.
   const tld = domainLabels[domainLabels.length - 1];
   const isPunycode = tld.startsWith("xn--") && tld.length >= 5;
-  const isAlphabeticTld = /^[a-z]{2,63}$/.test(tld);
-  if (!isAlphabeticTld && !isPunycode) return false;
+  const isKnownTld = VALID_TLDS.has(tld) || /^[a-z]{2}$/.test(tld);
+  if (!isKnownTld && !isPunycode) return false;
 
   if (BAD_ASSET_EXTENSIONS.has(tld)) return false;
   if (DUMMY_EMAILS.has(clean)) return false;
