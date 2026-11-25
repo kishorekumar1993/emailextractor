@@ -184,6 +184,21 @@ function getCleanTargetDomain() {
   return "";
 }
 
+function getTargetWebsiteUrl() {
+  const rawTarget = targetUrlInput ? targetUrlInput.value.trim() : "";
+  if (!rawTarget) return "";
+  let url;
+  try {
+    url = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(rawTarget) ? rawTarget : `https://${rawTarget}`);
+  } catch {
+    throw new Error("Enter a valid main website URL or leave it blank.");
+  }
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("The main website URL must start with http:// or https://.");
+  }
+  return url.toString();
+}
+
 function isEmailDomainMatch(email) {
   if (!email || !email.includes("@")) return false;
   const targetDomain = getCleanTargetDomain();
@@ -221,7 +236,8 @@ function appendEmailRow(finding) {
   }
 
   const occurrences = finding.occurrences || (finding.sources ? finding.sources.length : 1);
-  const displayUrl = finding.url || finding.sourceUrl || finding.mainPageUrl || "";
+  const mainPageUrl = getFindingMainPageUrl(finding);
+  const pdfUrl = getFindingPdfUrl(finding);
 
   const isMatch = isEmailDomainMatch(normEmail);
   const domainBadgeHtml = isMatch
@@ -231,7 +247,8 @@ function appendEmailRow(finding) {
   const rowHtml = `
     <td><strong>${escapeHtml(normEmail)}</strong>${domainBadgeHtml}</td>
     <td><span class="type-badge ${typeBadgeClass}">${escapeHtml((finding.sourceType || "HTML").toUpperCase())}</span></td>
-    <td><a class="source-link" href="${escapeHtml(displayUrl)}" target="_blank" title="${escapeHtml(displayUrl)}">${escapeHtml(displayUrl)}</a></td>
+    <td>${mainPageUrl ? `<a class="source-link" href="${escapeHtml(mainPageUrl)}" target="_blank" title="${escapeHtml(mainPageUrl)}">${escapeHtml(mainPageUrl)}</a>` : "—"}</td>
+    <td>${pdfUrl ? `<a class="source-link" href="${escapeHtml(pdfUrl)}" target="_blank" title="${escapeHtml(pdfUrl)}">${escapeHtml(pdfUrl)}</a>` : "—"}</td>
     <td style="text-align: center;"><strong>${occurrences}</strong></td>
   `;
 
@@ -250,6 +267,26 @@ function appendEmailRow(finding) {
   }
 }
 
+function getFindingMainPageUrl(finding) {
+  const sources = Array.isArray(finding.sources) ? finding.sources : [];
+  const pdfUrl = getFindingPdfUrl(finding);
+  const sourceType = (finding.sourceType || "").toLowerCase();
+  const mainPageUrl = finding.mainPageUrl || sources.find((source) => source.mainPageUrl)?.mainPageUrl;
+  if (mainPageUrl && mainPageUrl !== pdfUrl && !(sourceType.includes("pdf") && mainPageUrl === finding.sourceUrl)) {
+    return mainPageUrl;
+  }
+  if (pdfUrl || sourceType.includes("pdf")) return "";
+  return finding.sourceUrl || finding.url || "";
+}
+
+function getFindingPdfUrl(finding) {
+  if (finding.pdf) return finding.pdf;
+  const sources = Array.isArray(finding.sources) ? finding.sources : [];
+  const pdfSource = sources.find((source) => source.pdf);
+  if (pdfSource) return pdfSource.pdf;
+  return (finding.sourceType || "").toLowerCase().includes("pdf") ? finding.sourceUrl || "" : "";
+}
+
 function registerFoundEmail(finding) {
   if (!finding || !finding.email) return;
   const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
@@ -260,10 +297,24 @@ function registerFoundEmail(finding) {
 
   if (idx !== -1) {
     const existing = currentFindings[idx];
-    existing.occurrences = (existing.occurrences || 1) + 1;
-    if (finding.sources && Array.isArray(finding.sources)) {
-      existing.sources = finding.sources;
+    const incomingSources = Array.isArray(finding.sources) ? finding.sources : [{
+      sourceType: finding.sourceType || "HTML",
+      sourceUrl: finding.sourceUrl || finding.url || "",
+      mainPageUrl: finding.mainPageUrl || "",
+      pdf: finding.pdf || null
+    }];
+    if (!Array.isArray(existing.sources)) existing.sources = [];
+    for (const source of incomingSources) {
+      const alreadyExists = existing.sources.some(
+        (existingSource) =>
+          existingSource.sourceUrl === source.sourceUrl &&
+          existingSource.sourceType === source.sourceType
+      );
+      if (!alreadyExists) existing.sources.push(source);
     }
+    existing.occurrences = Math.max(existing.occurrences || 1, existing.sources.length);
+    if (!existing.pdf && finding.pdf) existing.pdf = finding.pdf;
+    if (!existing.mainPageUrl && finding.mainPageUrl) existing.mainPageUrl = finding.mainPageUrl;
   } else {
     currentFindings.push(finding);
   }
@@ -282,7 +333,7 @@ function renderEmailRows(items) {
     : items;
 
   if (visibleItems.length === 0) {
-    resultsBody.innerHTML = `<tr><td colspan="4" class="empty-state">${currentFindings.length > 0 ? "No emails matching current domain filter or search query." : "No emails extracted yet. Click 'Crawl Website' to start."}</td></tr>`;
+    resultsBody.innerHTML = `<tr><td colspan="5" class="empty-state">${currentFindings.length > 0 ? "No emails matching current domain filter or search query." : "No emails extracted yet. Click 'Crawl Website' to start."}</td></tr>`;
     return;
   }
 
@@ -343,6 +394,7 @@ async function scanPdfPageImages(pdfUrl, pdfRecord) {
     throw new Error("The local PDF/OCR libraries did not load. Reload the extension and try again.");
   }
   const strict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
+  const mainPageUrl = pdfRecord.mainPageUrl || "";
 
   const response = await fetch(pdfUrl, { credentials: "omit" });
   if (!response.ok) throw new Error(`PDF download failed (HTTP ${response.status}).`);
@@ -456,12 +508,12 @@ async function scanPdfPageImages(pdfUrl, pdfRecord) {
         pdf: pdfUrl,
         sourceType: "pdf",
         sourceUrl: pdfUrl,
-        mainPageUrl: pdfUrl,
+        mainPageUrl,
         occurrences: 1,
         sources: [{
           sourceType: "pdf",
           sourceUrl: pdfUrl,
-          mainPageUrl: pdfUrl,
+          mainPageUrl,
           pdf: pdfUrl,
           timestamp: new Date().toISOString()
         }]
@@ -870,12 +922,21 @@ if (scanPdfBtn) {
       return;
     }
 
+    let mainPageUrl;
+    try {
+      mainPageUrl = getTargetWebsiteUrl();
+    } catch (error) {
+      statusText.textContent = error.message || "Enter a valid main website URL.";
+      return;
+    }
+
     scanPdfBtn.disabled = true;
     statusText.textContent = "Downloading and scanning the PDF link...";
     try {
       const response = await chrome.runtime.sendMessage({
         type: "SCAN_PDF_LINK",
         url: pdfUrl,
+        mainUrl: mainPageUrl,
         filterCompliance: filterComplianceCheckbox ? filterComplianceCheckbox.checked : true,
         onlyDomainEmails: !!(onlyDomainEmailsCheckbox && onlyDomainEmailsCheckbox.checked),
         targetDomain: getCleanTargetDomain()
@@ -885,7 +946,8 @@ if (scanPdfBtn) {
         if (!pdfRecord) {
           pdfRecord = {
             url: pdfUrl,
-            sourcePage: "Direct PDF link",
+            sourcePage: mainPageUrl || "Direct PDF link",
+            mainPageUrl,
             status: `Background scan failed: ${(response && response.error) || "No response from the scanner."}`,
             emailsFound: 0,
             timestamp: new Date().toISOString()
@@ -944,6 +1006,8 @@ startBtn.addEventListener("click", async () => {
     return;
   }
 
+  // Completely wipe previous crawl data across memory and local storage
+  chrome.storage.local.remove(["lastCrawlState"]).catch(() => {});
   currentFindings = [];
   currentPdfs = [];
   currentImages = [];
@@ -951,8 +1015,9 @@ startBtn.addEventListener("click", async () => {
   pdfRowsMap.clear();
   imageRowsMap.clear();
   processedImages.clear();
+  pdfOcrJobs.clear();
 
-  resultsBody.innerHTML = `<tr><td colspan="4" class="empty-state">Starting email crawl...</td></tr>`;
+  resultsBody.innerHTML = `<tr><td colspan="5" class="empty-state">Starting email crawl...</td></tr>`;
   if (pdfsBody) pdfsBody.innerHTML = `<tr><td colspan="4" class="empty-state">Searching for PDF documents...</td></tr>`;
   if (imagesBody) imagesBody.innerHTML = `<tr><td colspan="4" class="empty-state">Searching for website images...</td></tr>`;
 
@@ -967,13 +1032,7 @@ startBtn.addEventListener("click", async () => {
   if (ocrStatus) ocrStatus.style.display = "none";
   searchInput.value = "";
   searchInput.style.display = "none";
-  exportBtn.disabled = true;
-  if (exportJsonBtn) exportJsonBtn.disabled = true;
-  copyBtn.disabled = true;
-  copyPathBtn.disabled = true;
-  if (copyPdfLinksBtn) copyPdfLinksBtn.disabled = true;
-  if (copyImageLinksBtn) copyImageLinksBtn.disabled = true;
-  if (copyAllUnifiedBtn) copyAllUnifiedBtn.disabled = true;
+  updateActionButtons();
 
   startBtn.style.display = "none";
   stopBtn.style.display = "inline-flex";
@@ -986,32 +1045,44 @@ startBtn.addEventListener("click", async () => {
   try {
     const activeTab = await detectActiveTab();
     if (activeTab && activeTab.id && activeTab.url && (activeTab.url.startsWith("http://") || activeTab.url.startsWith("https://"))) {
-      const execRes = await chrome.scripting.executeScript({
-        target: { tabId: activeTab.id },
-        func: () => {
-          const links = Array.from(document.querySelectorAll("a[href], [data-href], [data-url], iframe[src], embed[src]"))
-            .map((el) => el.getAttribute("href") || el.getAttribute("data-href") || el.getAttribute("data-url") || el.getAttribute("src"))
-            .filter(Boolean);
-          const pageHtml = document.documentElement ? document.documentElement.outerHTML : document.body.innerHTML;
-          return { links, pageHtml };
+      // Only harvest live DOM from the active tab if it belongs to the target domain being crawled
+      let isSameTargetDomain = false;
+      try {
+        const targetHost = new URL(targetUrl).hostname.replace(/^www\./i, "").toLowerCase();
+        const tabHost = new URL(activeTab.url).hostname.replace(/^www\./i, "").toLowerCase();
+        if (targetHost === tabHost || targetHost.endsWith("." + tabHost) || tabHost.endsWith("." + targetHost)) {
+          isSameTargetDomain = true;
         }
-      });
+      } catch {}
 
-      if (execRes && execRes[0] && execRes[0].result) {
-        initialLinks = execRes[0].result.links || [];
-        const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
-        const domEmails = normalizeAndExtractEmails(execRes[0].result.pageHtml || "", isStrict);
-        for (const em of domEmails) {
-          const item = {
-            email: em,
-            sourceType: "HTML (Live Tab)",
-            sourceUrl: activeTab.url,
-            mainPageUrl: activeTab.url,
-            occurrences: 1,
-            sources: [{ sourceType: "HTML (Live Tab)", sourceUrl: activeTab.url, mainPageUrl: activeTab.url, timestamp: new Date().toISOString() }]
-          };
-          initialFindings.push(item);
-          registerFoundEmail(item);
+      if (isSameTargetDomain) {
+        const execRes = await chrome.scripting.executeScript({
+          target: { tabId: activeTab.id },
+          func: () => {
+            const links = Array.from(document.querySelectorAll("a[href], [data-href], [data-url], iframe[src], embed[src]"))
+              .map((el) => el.getAttribute("href") || el.getAttribute("data-href") || el.getAttribute("data-url") || el.getAttribute("src"))
+              .filter(Boolean);
+            const pageHtml = document.documentElement ? document.documentElement.outerHTML : document.body.innerHTML;
+            return { links, pageHtml };
+          }
+        });
+
+        if (execRes && execRes[0] && execRes[0].result) {
+          initialLinks = execRes[0].result.links || [];
+          const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
+          const domEmails = normalizeAndExtractEmails(execRes[0].result.pageHtml || "", isStrict);
+          for (const em of domEmails) {
+            const item = {
+              email: em,
+              sourceType: "HTML (Live Tab)",
+              sourceUrl: activeTab.url,
+              mainPageUrl: activeTab.url,
+              occurrences: 1,
+              sources: [{ sourceType: "HTML (Live Tab)", sourceUrl: activeTab.url, mainPageUrl: activeTab.url, timestamp: new Date().toISOString() }]
+            };
+            initialFindings.push(item);
+            registerFoundEmail(item);
+          }
         }
       }
     }
@@ -1077,7 +1148,9 @@ if (copyAllUnifiedBtn) {
       sections.push(`EXTRACTED EMAIL ADDRESSES (${visibleEmails.length})`);
       sections.push(`=======================================================`);
       for (const f of visibleEmails) {
-        sections.push(`${f.email}\t[${(f.sourceType || "HTML").toUpperCase()}]\tFound On: ${f.sourceUrl || f.mainPageUrl || ""}`);
+        sections.push(
+          `${f.email}\t[${(f.sourceType || "HTML").toUpperCase()}]\tMain Page: ${getFindingMainPageUrl(f) || "Not provided"}\tPDF: ${getFindingPdfUrl(f) || "—"}`
+        );
       }
       sections.push("");
     }
@@ -1128,9 +1201,11 @@ copyBtn.addEventListener("click", () => {
 copyPathBtn.addEventListener("click", () => {
   const visibleEmails = getVisibleFindings();
   if (visibleEmails.length === 0) return;
-  const lines = ["email\tsource_type\tfound_on_page"];
+  const lines = ["email\tsource_type\tsource_url\tmain_website_url\tpdf_url"];
   for (const f of visibleEmails) {
-    lines.push(`${f.email}\t${f.sourceType || "HTML"}\t${f.sourceUrl || f.mainPageUrl || ""}`);
+    lines.push(
+      `${f.email}\t${f.sourceType || "HTML"}\t${f.sourceUrl || f.url || ""}\t${getFindingMainPageUrl(f)}\t${getFindingPdfUrl(f)}`
+    );
   }
   navigator.clipboard.writeText(lines.join("\n")).then(() => {
     const orig = copyPathBtn.textContent;
@@ -1201,15 +1276,16 @@ exportBtn.addEventListener("click", () => {
     }
   } else {
     filename = `extracted_emails_${domain}_${dateStr}.csv`;
-    rows.push(["Email", "Source Type", "Occurrences", "Source URL", "Main Website Page"].map(csvEscape).join(","));
+    rows.push(["Email", "Source Type", "Occurrences", "Source URL", "Main Website URL", "PDF URL"].map(csvEscape).join(","));
     const visibleEmails = getVisibleFindings();
     for (const f of visibleEmails) {
       rows.push([
         f.email,
         f.sourceType || "HTML",
         f.occurrences || (f.sources ? f.sources.length : 1),
-        f.sourceUrl || "",
-        f.mainPageUrl || f.sourceUrl || ""
+        f.sourceUrl || f.url || "",
+        getFindingMainPageUrl(f),
+        getFindingPdfUrl(f)
       ].map(csvEscape).join(","));
     }
   }

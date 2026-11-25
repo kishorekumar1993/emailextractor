@@ -1126,11 +1126,14 @@ async function runProductionCrawl(crawlState) {
     const pdfUrl = extraMeta.pdf || (sourceType.toLowerCase().includes("pdf") ? sourceUrl : null);
     const imageUrl = extraMeta.image || (sourceType.toLowerCase().includes("image") ? sourceUrl : null);
     const actualSourceType = extraMeta.sourceType || (pdfUrl ? "pdf" : (imageUrl ? "image" : "html"));
+    const resolvedMainPageUrl = mainPageUrl && (!pdfUrl || mainPageUrl !== pdfUrl)
+      ? mainPageUrl
+      : (isPdfUrl(startUrl) ? "" : startUrl);
 
     const sourceEntry = {
       sourceType: actualSourceType,
       sourceUrl: sourceUrl || startUrl,
-      mainPageUrl: mainPageUrl || sourceUrl || startUrl,
+      mainPageUrl: resolvedMainPageUrl,
       pdf: pdfUrl,
       image: imageUrl,
       timestamp: nowStr
@@ -1145,19 +1148,20 @@ async function runProductionCrawl(crawlState) {
         existing.occurrences = existing.sources.length;
         if (!existing.pdf && pdfUrl) existing.pdf = pdfUrl;
         if (!existing.image && imageUrl) existing.image = imageUrl;
+        if (!existing.mainPageUrl && resolvedMainPageUrl) existing.mainPageUrl = resolvedMainPageUrl;
         emitEmailFound(existing);
         persistCrawlState(false);
       }
     } else {
       const item = {
         copy: cleanEmail,
-        url: mainPageUrl || sourceUrl || startUrl,
+        url: sourceUrl || resolvedMainPageUrl || startUrl,
         pdf: pdfUrl,
         image: imageUrl,
         sourceType: actualSourceType,
         email: cleanEmail,
         sourceUrl: sourceUrl || startUrl,
-        mainPageUrl: mainPageUrl || sourceUrl || startUrl,
+        mainPageUrl: resolvedMainPageUrl,
         occurrences: 1,
         sources: [sourceEntry]
       };
@@ -1180,6 +1184,9 @@ async function runProductionCrawl(crawlState) {
       const pdfRecord = {
         url: pdfUrl,
         sourcePage: sourcePage || startUrl,
+        mainPageUrl: sourcePage && !isPdfUrl(sourcePage)
+          ? sourcePage
+          : (isPdfUrl(startUrl) ? "" : startUrl),
         status: "Queued",
         emailsFound: 0,
         timestamp: new Date().toISOString()
@@ -1321,7 +1328,10 @@ async function runProductionCrawl(crawlState) {
       if (visitedPdfs.has(currentUrl)) return;
       visitedPdfs.add(currentUrl);
 
-      const mainSitePage = currentItem.sourcePage || currentUrl;
+      const sourcePage = currentItem.sourcePage || "";
+      const mainSitePage = sourcePage && !isPdfUrl(sourcePage)
+        ? sourcePage
+        : (isPdfUrl(startUrl) ? "" : startUrl);
 
       try {
         const res = await fetch(currentUrl, {
@@ -1761,9 +1771,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return false;
     }
 
+    let mainPageUrl = "";
+    if (msg.mainUrl) {
+      try {
+        const parsedMainUrl = new URL(msg.mainUrl);
+        if (!["http:", "https:"].includes(parsedMainUrl.protocol)) {
+          throw new Error("The main website URL must start with http:// or https://.");
+        }
+        if (parsedMainUrl.toString() !== pdfUrl && !isPdfUrl(parsedMainUrl.toString())) {
+          mainPageUrl = parsedMainUrl.toString();
+        }
+      } catch (error) {
+        sendResponse({ ok: false, error: error.message || "Enter a valid main website URL." });
+        return false;
+      }
+    }
+
     const pdfRecord = {
       url: pdfUrl,
-      sourcePage: "Direct PDF link",
+      sourcePage: mainPageUrl || "Direct PDF link",
+      mainPageUrl,
       status: "Scanning",
       emailsFound: 0,
       timestamp: new Date().toISOString()
@@ -1794,12 +1821,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           pdf: pdfUrl,
           sourceType: "pdf",
           sourceUrl: pdfUrl,
-          mainPageUrl: pdfUrl,
+          mainPageUrl,
           occurrences: 1,
           sources: [{
             sourceType: "pdf",
             sourceUrl: pdfUrl,
-            mainPageUrl: pdfUrl,
+            mainPageUrl,
             pdf: pdfUrl,
             timestamp: new Date().toISOString()
           }]
@@ -1834,6 +1861,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       activeCrawl.isCrawling = false;
     }
 
+    // Completely wipe old completed crawl and storage so old data never bleeds into new crawl
+    lastCompletedCrawl = null;
+    chrome.storage.local.remove(["lastCrawlState"]).catch(() => {});
+
     const crawlState = {
       aborted: false,
       startUrl: msg.startUrl,
@@ -1846,7 +1877,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       includeSubdomains: !!msg.includeSubdomains,
       initialFindings: msg.initialFindings || [],
       initialLinks: msg.initialLinks || [],
-      isCrawling: true
+      isCrawling: true,
+      findings: [...(msg.initialFindings || [])],
+      discoveredPdfs: [],
+      discoveredImages: [],
+      visitedUrls: new Set(),
+      visitedPdfs: new Set()
     };
     activeCrawl = crawlState;
 
@@ -1854,13 +1890,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     runProductionCrawl(crawlState)
       .then((data) => {
+        if (crawlState.aborted || activeCrawl !== crawlState) {
+          return; // Superseeded or aborted by user
+        }
         lastCompletedCrawl = { ...data, isCrawling: false };
-        if (activeCrawl === crawlState) activeCrawl = null;
+        activeCrawl = null;
         persistCrawlState(true);
         chrome.runtime.sendMessage({ type: "CRAWL_COMPLETED", data: lastCompletedCrawl }).catch(() => {});
       })
       .catch((err) => {
-        if (activeCrawl === crawlState) activeCrawl = null;
+        if (crawlState.aborted || activeCrawl !== crawlState) {
+          return;
+        }
+        activeCrawl = null;
         persistCrawlState(false);
         chrome.runtime.sendMessage({ type: "CRAWL_FAILED", error: err.message }).catch(() => {});
       });
