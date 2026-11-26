@@ -55,7 +55,9 @@ const alwaysWindowModeCheckbox = document.getElementById("alwaysWindowMode");
 const popoutWindowBtn = document.getElementById("popoutWindowBtn");
 const closeWindowBtn = document.getElementById("closeWindowBtn");
 const windowModeBadge = document.getElementById("windowModeBadge");
+const clearDataBtn = document.getElementById("clearDataBtn");
 
+let currentCrawlId = null;
 let currentFindings = [];
 let currentPdfs = [];
 let currentImages = [];
@@ -67,6 +69,48 @@ let pdfOcrQueue = Promise.resolve();
 let activeTab = "emails";
 let isCrawling = false;
 let statusPollTimer = null;
+
+function clearAllCrawlData(notifyBackground = true) {
+  isCrawling = false;
+  stopStatusPoll();
+  currentCrawlId = "crawl_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
+
+  if (notifyBackground) {
+    chrome.runtime.sendMessage({ type: "RESET_CRAWL", crawlId: currentCrawlId }).catch(() => {});
+  }
+  chrome.storage.local.remove(["lastCrawlState"]).catch(() => {});
+
+  currentFindings = [];
+  currentPdfs = [];
+  currentImages = [];
+  emailRowsMap.clear();
+  pdfRowsMap.clear();
+  imageRowsMap.clear();
+  processedImages.clear();
+  pdfOcrJobs.clear();
+
+  resultsBody.innerHTML = `<tr><td colspan="5" class="empty-state">No emails detected yet.</td></tr>`;
+  if (pdfsBody) pdfsBody.innerHTML = `<tr><td colspan="4" class="empty-state">No PDF documents discovered yet.</td></tr>`;
+  if (imagesBody) imagesBody.innerHTML = `<tr><td colspan="4" class="empty-state">No images discovered yet.</td></tr>`;
+
+  statPages.textContent = "0";
+  statPdfs.textContent = "0";
+  if (statImages) statImages.textContent = "0";
+  statEmails.textContent = "0";
+  statQueue.textContent = "0";
+  if (tabEmailsCount) tabEmailsCount.textContent = "0";
+  if (tabPdfsCount) tabPdfsCount.textContent = "0";
+  if (tabImagesCount) tabImagesCount.textContent = "0";
+  if (ocrStatus) ocrStatus.style.display = "none";
+  if (searchInput) {
+    searchInput.value = "";
+    searchInput.style.display = "none";
+  }
+
+  startBtn.style.display = "inline-flex";
+  stopBtn.style.display = "none";
+  updateActionButtons();
+}
 
 function setActiveTab(tab) {
   activeTab = tab;
@@ -95,33 +139,16 @@ function startStatusPoll() {
     try {
       const res = await chrome.runtime.sendMessage({ type: "GET_CRAWL_STATUS" });
       if (!res || !res.ok) return;
+      if (res.crawlId && currentCrawlId && res.crawlId !== currentCrawlId) {
+        return; // Ignore responses from previous or superseded crawls
+      }
       if (!res.isCrawling && isCrawling) {
-        // Background died, finished silently, or service worker recycled
         isCrawling = false;
         startBtn.style.display = "inline-flex";
         stopBtn.style.display = "none";
         statusText.textContent = res.aborted
           ? "Crawl stopped."
           : `Crawl completed! Extracted ${currentFindings.length} unique emails from ${statPages.textContent} pages, ${currentPdfs.length} PDFs & ${currentImages.length} images.`;
-        if (Array.isArray(res.findings)) {
-          res.findings.forEach(registerFoundEmail);
-        }
-        if (Array.isArray(res.discoveredPdfs)) {
-          for (const p of res.discoveredPdfs) {
-            if (!currentPdfs.some((ex) => ex.url === p.url)) {
-              currentPdfs.push(p);
-              appendPdfRow(p);
-            }
-          }
-        }
-        if (Array.isArray(res.discoveredImages)) {
-          for (const img of res.discoveredImages) {
-            if (!currentImages.some((ex) => ex.url === img.url)) {
-              currentImages.push(img);
-              appendImageRow(img);
-            }
-          }
-        }
         updateActionButtons();
         stopStatusPoll();
       }

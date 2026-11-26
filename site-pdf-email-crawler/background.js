@@ -1040,6 +1040,7 @@ function persistCrawlState(isComplete = false) {
   if (!crawl) return;
   chrome.storage.local.set({
     lastCrawlState: {
+      crawlId: crawl.crawlId,
       status: isComplete ? "completed" : (crawl.isCrawling ? "running" : (crawl.aborted ? "stopped" : "completed")),
       startUrl: crawl.startUrl,
       pagesCrawled: crawl.visitedUrls ? crawl.visitedUrls.size : (crawl.pagesCrawled || 0),
@@ -1055,10 +1056,11 @@ function persistCrawlState(isComplete = false) {
 let lastProgressEmitTime = 0;
 let lastPersistTime = 0;
 function emitProgress(data) {
+  const crawlId = activeCrawl ? activeCrawl.crawlId : null;
   const now = Date.now();
   if (now - lastProgressEmitTime < 100 && (data.queueRemaining ?? 0) !== 0) return;
   lastProgressEmitTime = now;
-  chrome.runtime.sendMessage({ type: "CRAWL_PROGRESS", ...data }).catch(() => {});
+  chrome.runtime.sendMessage({ type: "CRAWL_PROGRESS", crawlId, ...data }).catch(() => {});
   if (now - lastPersistTime > 2000) {
     lastPersistTime = now;
     persistCrawlState(false);
@@ -1066,7 +1068,8 @@ function emitProgress(data) {
 }
 
 function emitEmailFound(finding) {
-  chrome.runtime.sendMessage({ type: "EMAIL_FOUND", finding }).catch(() => {});
+  const crawlId = activeCrawl ? activeCrawl.crawlId : null;
+  chrome.runtime.sendMessage({ type: "EMAIL_FOUND", crawlId, finding }).catch(() => {});
 }
 
 async function runProductionCrawl(crawlState) {
@@ -1850,6 +1853,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === "RESET_CRAWL") {
+    if (activeCrawl) {
+      activeCrawl.aborted = true;
+      activeCrawl.isCrawling = false;
+      if (activeCrawl.abortController) {
+        activeCrawl.abortController.abort();
+      }
+      activeCrawl = null;
+    }
+    lastCompletedCrawl = null;
+    chrome.storage.local.remove(["lastCrawlState"]).catch(() => {});
+    sendResponse({ ok: true, reset: true });
+    return false;
+  }
+
   if (msg.type === "START_CRAWL") {
     if (activeCrawl && activeCrawl.isCrawling) {
       if (activeCrawl.abortController) {
@@ -1857,13 +1875,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       activeCrawl.aborted = true;
       activeCrawl.isCrawling = false;
+      activeCrawl = null;
     }
 
     // Completely wipe old completed crawl and storage so old data never bleeds into new crawl
     lastCompletedCrawl = null;
     chrome.storage.local.remove(["lastCrawlState"]).catch(() => {});
 
+    const crawlId = msg.crawlId || ("crawl_" + Date.now());
     const crawlState = {
+      crawlId,
       aborted: false,
       startUrl: msg.startUrl,
       maxPages: msg.maxPages || 500,
@@ -1884,17 +1905,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     };
     activeCrawl = crawlState;
 
-    sendResponse({ ok: true, started: true });
+    sendResponse({ ok: true, started: true, crawlId });
 
     runProductionCrawl(crawlState)
       .then((data) => {
         if (crawlState.aborted || activeCrawl !== crawlState) {
           return; // Superseeded or aborted by user
         }
-        lastCompletedCrawl = { ...data, isCrawling: false };
+        lastCompletedCrawl = { ...data, crawlId, isCrawling: false };
         activeCrawl = null;
         persistCrawlState(true);
-        chrome.runtime.sendMessage({ type: "CRAWL_COMPLETED", data: lastCompletedCrawl }).catch(() => {});
+        chrome.runtime.sendMessage({ type: "CRAWL_COMPLETED", crawlId, data: lastCompletedCrawl }).catch(() => {});
       })
       .catch((err) => {
         if (crawlState.aborted || activeCrawl !== crawlState) {
@@ -1902,7 +1923,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         activeCrawl = null;
         persistCrawlState(false);
-        chrome.runtime.sendMessage({ type: "CRAWL_FAILED", error: err.message }).catch(() => {});
+        chrome.runtime.sendMessage({ type: "CRAWL_FAILED", crawlId, error: err.message }).catch(() => {});
       });
 
     return false;
@@ -1925,6 +1946,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (activeCrawl && activeCrawl.isCrawling) {
       sendResponse({
         ok: true,
+        crawlId: activeCrawl.crawlId,
         isCrawling: true,
         aborted: false,
         findings: activeCrawl.findings || [],
@@ -1939,6 +1961,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     } else if (lastCompletedCrawl) {
       sendResponse({
         ok: true,
+        crawlId: lastCompletedCrawl.crawlId,
         isCrawling: false,
         aborted: !!lastCompletedCrawl.aborted,
         findings: lastCompletedCrawl.findings || [],
@@ -1956,6 +1979,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (saved) {
           sendResponse({
             ok: true,
+            crawlId: saved.crawlId,
             isCrawling: false,
             aborted: saved.status === "stopped",
             findings: saved.findings || [],
