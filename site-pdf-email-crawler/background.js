@@ -68,8 +68,8 @@ const DUMMY_LOCAL_PREFIXES = new Set([
   "someone", "placeholder", "sample", "test", "testing", "first.last", "fullname"
 ]);
 
-// Compliance, GDPR, DPO, legal notices & automated daemon emails
-const COMPLIANCE_LOCAL_REGEX = /^(?:gdpr|dpo|dpo_.*|groupdpo|nomarketing|no-marketing|unsubscribe|optout|opt-out|noreply|no-reply|donotreply|do-not-reply|mailer-daemon|auto-reply|dataprotection|data-protection|cookie|cookies|abuse|postmaster|webmaster|hostmaster)$/i;
+// Automated robot and daemon emails
+const COMPLIANCE_LOCAL_REGEX = /^(?:noreply|no-reply|donotreply|do-not-reply|mailer-daemon|auto-reply)$/i;
 
 // File extensions to skip during HTML page crawling
 const SKIP_EXT_REGEX = /\.(css|js|jsx|ts|tsx|map|json|xml|rss|atom|woff|woff2|ttf|eot|otf|mp4|webm|ogv|avi|mov|mp3|ogg|wav|flac|aac|zip|tar|gz|bz2|rar|7z|dmg|exe|msi|bin|iso|apk|ipa|wasm|jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif)$/i;
@@ -1891,7 +1891,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       concurrency: msg.concurrency || 8,
       checkPdfs: msg.checkPdfs !== false,
       ocrImages: msg.ocrImages !== false,
-      filterCompliance: msg.filterCompliance !== false,
+      filterCompliance: !!msg.filterCompliance,
       onlyDomainEmails: !!msg.onlyDomainEmails,
       includeSubdomains: !!msg.includeSubdomains,
       initialFindings: msg.initialFindings || [],

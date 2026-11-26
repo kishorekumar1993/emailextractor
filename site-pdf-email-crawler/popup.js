@@ -709,7 +709,7 @@ const POPUP_DUMMY_LOCAL_PREFIXES = new Set([
   "someone", "placeholder", "sample", "test", "testing", "first.last", "fullname"
 ]);
 
-const POPUP_COMPLIANCE_LOCAL_REGEX = /^(?:gdpr|dpo|dpo_.*|groupdpo|nomarketing|no-marketing|unsubscribe|optout|opt-out|noreply|no-reply|donotreply|do-not-reply|mailer-daemon|auto-reply|dataprotection|data-protection|cookie|cookies|abuse|postmaster|webmaster|hostmaster)$/i;
+const POPUP_COMPLIANCE_LOCAL_REGEX = /^(?:noreply|no-reply|donotreply|do-not-reply|mailer-daemon|auto-reply)$/i;
 
 function isPopupValidEmail(email, filterCompliance = true) {
   if (!email || typeof email !== "string") return false;
@@ -889,6 +889,10 @@ function enqueueImageOcr(task) {
 
 // ── Message Listener ─────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg) => {
+  // Discard messages from previous or superseded crawls
+  if (msg.crawlId && currentCrawlId && msg.crawlId !== currentCrawlId) {
+    return;
+  }
   if (msg.type === "EMAIL_FOUND" && msg.finding) {
     registerFoundEmail(msg.finding);
   }
@@ -1045,7 +1049,7 @@ if (scanPdfBtn) {
         type: "SCAN_PDF_LINK",
         url: pdfUrl,
         mainUrl: mainPageUrl,
-        filterCompliance: filterComplianceCheckbox ? filterComplianceCheckbox.checked : true,
+        filterCompliance: !!(filterComplianceCheckbox && filterComplianceCheckbox.checked),
         onlyDomainEmails: !!(onlyDomainEmailsCheckbox && onlyDomainEmailsCheckbox.checked),
         targetDomain: getCleanTargetDomain()
       });
@@ -1114,38 +1118,17 @@ startBtn.addEventListener("click", async () => {
     return;
   }
 
-  // Completely wipe previous crawl data across memory and local storage
-  chrome.storage.local.remove(["lastCrawlState"]).catch(() => {});
-  currentFindings = [];
-  currentPdfs = [];
-  currentImages = [];
-  emailRowsMap.clear();
-  pdfRowsMap.clear();
-  imageRowsMap.clear();
-  processedImages.clear();
-  pdfOcrJobs.clear();
+  // 1. Immediately wipe previous crawl data across memory and local storage
+  clearAllCrawlData(true);
 
-  resultsBody.innerHTML = `<tr><td colspan="5" class="empty-state">Starting email crawl...</td></tr>`;
-  if (pdfsBody) pdfsBody.innerHTML = `<tr><td colspan="4" class="empty-state">Searching for PDF documents...</td></tr>`;
-  if (imagesBody) imagesBody.innerHTML = `<tr><td colspan="4" class="empty-state">Searching for website images...</td></tr>`;
-
-  statPages.textContent = "0";
-  statPdfs.textContent = "0";
-  if (statImages) statImages.textContent = "0";
-  statEmails.textContent = "0";
-  statQueue.textContent = "1";
-  if (tabEmailsCount) tabEmailsCount.textContent = "0";
-  if (tabPdfsCount) tabPdfsCount.textContent = "0";
-  if (tabImagesCount) tabImagesCount.textContent = "0";
-  if (ocrStatus) ocrStatus.style.display = "none";
-  searchInput.value = "";
-  searchInput.style.display = "none";
-  updateActionButtons();
-
+  // 2. Set crawling UI state
   startBtn.style.display = "none";
   stopBtn.style.display = "inline-flex";
   isCrawling = true;
-  startStatusPoll();
+  statQueue.textContent = "1";
+  resultsBody.innerHTML = `<tr><td colspan="5" class="empty-state">Starting email crawl...</td></tr>`;
+  if (pdfsBody) pdfsBody.innerHTML = `<tr><td colspan="4" class="empty-state">Searching for PDF documents...</td></tr>`;
+  if (imagesBody) imagesBody.innerHTML = `<tr><td colspan="4" class="empty-state">Searching for website images...</td></tr>`;
   statusText.textContent = "Connecting to website and crawling pages...";
 
   let initialFindings = [];
@@ -1177,7 +1160,7 @@ startBtn.addEventListener("click", async () => {
 
         if (execRes && execRes[0] && execRes[0].result) {
           initialLinks = execRes[0].result.links || [];
-          const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
+          const isStrict = !!(filterComplianceCheckbox && filterComplianceCheckbox.checked);
           const domEmails = normalizeAndExtractEmails(execRes[0].result.pageHtml || "", isStrict);
           for (const em of domEmails) {
             const item = {
@@ -1201,37 +1184,38 @@ startBtn.addEventListener("click", async () => {
   chrome.runtime.sendMessage(
     {
       type: "START_CRAWL",
+      crawlId: currentCrawlId,
       startUrl: targetUrl,
       maxPages: parseInt(maxPagesSelect.value, 10),
       concurrency: parseInt(concurrencySelect.value, 10),
       checkPdfs: checkPdfsCheckbox.checked,
       ocrImages: !!(ocrImagesCheckbox && ocrImagesCheckbox.checked),
-      filterCompliance: filterComplianceCheckbox ? filterComplianceCheckbox.checked : true,
+      filterCompliance: !!(filterComplianceCheckbox && filterComplianceCheckbox.checked),
       onlyDomainEmails: !!(onlyDomainEmailsCheckbox && onlyDomainEmailsCheckbox.checked),
       includeSubdomains: includeSubdomainsCheckbox.checked,
       initialFindings,
       initialLinks
     },
     (response) => {
-      if (chrome.runtime.lastError) {
+      if (chrome.runtime.lastError || !response || !response.ok) {
         isCrawling = false;
         stopStatusPoll();
         startBtn.style.display = "inline-flex";
         stopBtn.style.display = "none";
-        statusText.textContent = `Error: ${chrome.runtime.lastError.message}`;
+        statusText.textContent = chrome.runtime.lastError ? `Error: ${chrome.runtime.lastError.message}` : "Failed to initiate crawl process.";
         return;
       }
-
-      if (!response || !response.ok) {
-        isCrawling = false;
-        stopStatusPoll();
-        startBtn.style.display = "inline-flex";
-        stopBtn.style.display = "none";
-        statusText.textContent = "Failed to initiate crawl process.";
-      }
+      startStatusPoll();
     }
   );
 });
+
+if (clearDataBtn) {
+  clearDataBtn.addEventListener("click", () => {
+    clearAllCrawlData(true);
+    statusText.textContent = "All crawl data cleared. Ready for a new crawl.";
+  });
+}
 
 // ── Stop Crawl Handler ───────────────────────────────────────────────
 stopBtn.addEventListener("click", () => {
@@ -1503,6 +1487,7 @@ if (targetUrlInput && !targetUrlInput.value) {
 
 function syncCrawlState(res) {
   if (!res) return;
+  if (res.crawlId) currentCrawlId = res.crawlId;
 
   if (Array.isArray(res.findings) && res.findings.length > 0) {
     for (const f of res.findings) {
