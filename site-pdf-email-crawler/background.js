@@ -74,8 +74,8 @@ const COMPLIANCE_LOCAL_REGEX = /^(?:gdpr|dpo|dpo_.*|groupdpo|nomarketing|no-mark
 // File extensions to skip during HTML page crawling
 const SKIP_EXT_REGEX = /\.(css|js|jsx|ts|tsx|map|json|xml|rss|atom|woff|woff2|ttf|eot|otf|mp4|webm|ogv|avi|mov|mp3|ogg|wav|flac|aac|zip|tar|gz|bz2|rar|7z|dmg|exe|msi|bin|iso|apk|ipa|wasm|jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff|tif)$/i;
 
-// Paths to ignore (includes pure compliance, GDPR, cookie policy & terms pages)
-const IGNORE_PATH_REGEX = /\/(?:wp-includes|wp-json|xmlrpc\.php|cdn-cgi|cgi-bin|node_modules|\.well-known|privacy-policy|privacy|cookie-policy|cookie-notice|cookies|terms-of-use|terms-of-service|terms-and-conditions|terms|legal-notice|legal|disclaimer|imprint-privacy|impressum-datenschutz|gdpr|dpo)\b/i;
+// Paths to ignore (technical assets, API endpoints, internal scripts)
+const IGNORE_PATH_REGEX = /\/(?:wp-includes|wp-json|xmlrpc\.php|cdn-cgi|cgi-bin|node_modules|\.well-known|cookie-policy|cookie-notice|cookies)\b/i;
 
 // High priority contact, catalog, download, agent and about pages across all languages
 const HIGH_PRIORITY_REGEX = /(?:contact|about|enquiry|inquiry|reach-us|get-in-touch|support|feedback|connect|team|staff|office|location|imprint|impressum|profile|catalog|catalogue|katalog|download|brochure|cert|spec|company|video|animation|media|tour|corp|exhibition|agent|agents|distributor|distributors|dealer|dealers|representatives|rep|branch|partners|聯絡|關於|簡介|型錄|下載|影片|影音)/i;
@@ -1392,7 +1392,7 @@ async function runProductionCrawl(crawlState) {
         if (SKIP_EXT_REGEX.test(currentUrl)) return;
 
         const res = await fetch(currentUrl, {
-          credentials: "omit",
+          credentials: "include",
           headers: STANDARD_FETCH_HEADERS,
           signal: createFetchSignal(7500)
         });
@@ -1407,10 +1407,8 @@ async function runProductionCrawl(crawlState) {
         if (currentUrl === initialUrl && finalUrl !== currentUrl) {
           try {
             const finalObj = new URL(finalUrl);
-            if (normalizeHost(finalObj.hostname) !== normalizeHost(baseHostname)) {
-              baseHostname = finalObj.hostname;
-              baseOrigin = finalObj.origin;
-            }
+            baseHostname = finalObj.hostname;
+            baseOrigin = finalObj.origin;
           } catch {}
         }
 

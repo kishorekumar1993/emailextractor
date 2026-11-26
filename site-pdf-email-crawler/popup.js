@@ -718,13 +718,71 @@ function isPopupValidEmail(email, filterCompliance = true) {
   return true;
 }
 
+function decodeCloudflareEmail(cfHex) {
+  try {
+    const k = parseInt(cfHex.slice(0, 2), 16);
+    let str = "";
+    for (let i = 2; i < cfHex.length; i += 2) {
+      str += String.fromCharCode(parseInt(cfHex.slice(i, i + 2), 16) ^ k);
+    }
+    return str;
+  } catch {
+    return "";
+  }
+}
+
+function decodeHtmlEntities(str) {
+  return (str || "")
+    .replace(/&#([0-9]{1,7});/gi, (_, code) => {
+      try {
+        return String.fromCharCode(parseInt(code, 10));
+      } catch {
+        return "";
+      }
+    })
+    .replace(/&#x([0-9a-f]{1,6});/gi, (_, hex) => {
+      try {
+        return String.fromCharCode(parseInt(hex, 16));
+      } catch {
+        return "";
+      }
+    })
+    .replace(/&commat;/gi, "@")
+    .replace(/&period;/gi, ".")
+    .replace(/&colon;/gi, ":")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+}
+
 function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   if (!rawText || typeof rawText !== "string") return [];
   const MAX = 1_200_000; // 1.2 MB hard cap prevents UI freeze on huge blobs
   if (rawText.length > MAX) rawText = rawText.slice(0, MAX);
   const found = new Set();
 
-  let deobf = rawText
+  function checkAndAdd(candidate) {
+    if (!candidate) return;
+    let c = candidate.trim().toLowerCase().replace(/^[<(\["']+|[>)\]"',;:.!]+$/g, "");
+    if (isPopupValidEmail(c, filterCompliance)) {
+      found.add(c);
+    }
+  }
+
+  // 1. Cloudflare __cf_email__ protected emails
+  const cfRegex = /(?:data-cfemail=["']([0-9a-fA-F]+)["']|\/cdn-cgi\/l\/email-protection#([0-9a-fA-F]+))/gi;
+  let cfMatch;
+  while ((cfMatch = cfRegex.exec(rawText)) !== null) {
+    const hex = cfMatch[1] || cfMatch[2];
+    const decoded = decodeCloudflareEmail(hex);
+    if (decoded) checkAndAdd(decoded);
+  }
+
+  // 2. Decode HTML entities and URL hex encodings
+  let deobf = decodeHtmlEntities(rawText)
+    .replace(/%40/gi, "@")
+    .replace(/%2e/gi, ".")
     .replace(/\s*(?:\[at\]|\(at\)|\{at\}|\[AT\]|\(AT\)|_at_|\/\*at\*\/)\s*/g, "@")
     .replace(/\s*(?:\[dot\]|\(dot\)|\{dot\}|\[DOT\]|\(DOT\)|_dot_|\/\*dot\*\/)\s*/g, ".")
     .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63})\b/g, "$1@$2")
@@ -733,14 +791,37 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
     .replace(/\b([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z0-9-]{2,63})\b/g, "$1.$2@$3.$4")
     .replace(/@([a-zA-Z0-9-]+),([a-zA-Z]{2,10})/g, "@$1.$2");
 
-  const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63}/g;
-  const matches = deobf.match(regex) || [];
-  for (let m of matches) {
-    m = m.toLowerCase().replace(/^[<(\["']+|[>)\]"',;:.!]+$/g, "");
-    if (isPopupValidEmail(m, filterCompliance)) {
-      found.add(m);
+  // 3. Raw HTML attributes (value, content, data-*, alt, title)
+  const attrRegex = /\b(?:value|content|data-[a-z0-9_-]+|action|alt|title)=["']([^"']+)["']/gi;
+  let attrMatch;
+  while ((attrMatch = attrRegex.exec(rawText)) !== null) {
+    const val = attrMatch[1];
+    if (val && val.includes("@")) {
+      for (const p of val.split(/[\s,;]+/)) {
+        checkAndAdd(p.replace(/^mailto:/i, "").trim());
+      }
     }
   }
+
+  // 4. Standard email regex
+  const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63}/g;
+  const matches = deobf.match(regex) || [];
+  for (const m of matches) {
+    checkAndAdd(m);
+  }
+
+  // 5. Direct mailto links
+  const mailtoRegex = /\bmailto:([^\s"'<>]+)/gi;
+  let mMatch;
+  while ((mMatch = mailtoRegex.exec(rawText)) !== null) {
+    try {
+      const decodedMailto = decodeURIComponent(mMatch[1]);
+      for (const p of decodedMailto.split(/[\s,;?&=]+/)) {
+        if (p.includes("@")) checkAndAdd(p.replace(/^(?:to|cc|bcc):/i, "").trim());
+      }
+    } catch {}
+  }
+
   return Array.from(found);
 }
 
