@@ -17,6 +17,8 @@
   "web_accessible_resources": [
     {
       "resources": [
+        "lib/pdf.min.js",
+        "lib/pdf.worker.min.js",
         "lib/worker.min.js",
         "lib/tesseract-core-simd-lstm.wasm.js",
         "lib/tesseract-core-simd-lstm.wasm",

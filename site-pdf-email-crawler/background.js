@@ -3,6 +3,15 @@
 // Pure High-Speed Email Crawler & Deep PDF Text Extraction Engine
 // ═══════════════════════════════════════════════════════════════════════
 
+// Synchronously load PDF library into Service Worker global scope at initial startup.
+// In Chrome Manifest V3, importScripts() MUST be executed synchronously on worker boot;
+// calling it inside asynchronous callbacks or event listeners throws a fatal WorkerGlobalScope error.
+try {
+  importScripts("lib/pdf.min.js");
+} catch (e) {
+  console.warn("Synchronous load of lib/pdf.min.js on worker startup failed:", e);
+}
+
 // Standard request headers for web pages and PDF streams
 const STANDARD_FETCH_HEADERS = {
   "User-Agent":
@@ -565,14 +574,22 @@ async function extractDeepPdfText(uint8) {
 }
 
 function getPdfJsLibrary() {
-  if (!globalThis.pdfjsLib) {
+  if (globalThis.pdfjsLib && typeof globalThis.pdfjsLib.getDocument === "function") {
+    try {
+      globalThis.pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("lib/pdf.worker.min.js");
+    } catch {}
+    return globalThis.pdfjsLib;
+  }
+  try {
     importScripts("lib/pdf.min.js");
+  } catch {}
+  if (globalThis.pdfjsLib && typeof globalThis.pdfjsLib.getDocument === "function") {
+    try {
+      globalThis.pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("lib/pdf.worker.min.js");
+    } catch {}
+    return globalThis.pdfjsLib;
   }
-  if (!globalThis.pdfjsLib || typeof globalThis.pdfjsLib.getDocument !== "function") {
-    throw new Error("The bundled PDF text parser could not be loaded.");
-  }
-  globalThis.pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("lib/pdf.worker.min.js");
-  return globalThis.pdfjsLib;
+  return null;
 }
 
 function extractPdfPageText(items) {
@@ -611,6 +628,9 @@ async function extractEmailsFromPdfBytes(buffer, filterCompliance = true) {
   let pdf;
   try {
     const pdfjs = getPdfJsLibrary();
+    if (!pdfjs) {
+      throw new Error("The bundled PDF.js parser is not available in the background worker.");
+    }
     loadingTask = pdfjs.getDocument({
       data: new Uint8Array(buffer),
       disableWorker: true,
@@ -690,11 +710,27 @@ async function extractEmailsFromPdfBytes(buffer, filterCompliance = true) {
       usedFallback
     };
   } catch (error) {
-    console.debug("PDF.js text extraction failed; trying the basic PDF parser:", error);
-    const fallbackText = await extractDeepPdfText(new Uint8Array(buffer));
-    const emails = normalizeAndExtractEmails(fallbackText, filterCompliance);
-    if (emails.length === 0) throw error;
-    return { emails, pagesScanned: 0, totalPages: null, pagesFailed: 0, usedFallback: true };
+    console.debug("PDF.js text extraction failed; running basic PDF stream parser fallback:", error && error.message);
+    try {
+      const fallbackText = await extractDeepPdfText(new Uint8Array(buffer));
+      const fallbackEmails = normalizeAndExtractEmails(fallbackText, filterCompliance);
+      return {
+        emails: fallbackEmails,
+        pagesScanned: 0,
+        totalPages: null,
+        pagesFailed: 0,
+        usedFallback: true
+      };
+    } catch (fallbackError) {
+      console.debug("Basic parser fallback also failed:", fallbackError && fallbackError.message);
+      return {
+        emails: [],
+        pagesScanned: 0,
+        totalPages: null,
+        pagesFailed: 0,
+        usedFallback: true
+      };
+    }
   } finally {
     if (pdf) await pdf.destroy();
     else if (loadingTask && loadingTask.destroy) await loadingTask.destroy();
