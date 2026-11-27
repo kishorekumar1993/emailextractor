@@ -225,12 +225,23 @@ function isValidEmail(email, filterCompliance = true) {
   return true;
 }
 
-function normalizeAndExtractEmails(rawText, filterCompliance = true) {
-  if (!rawText || typeof rawText !== "string") return [];
+function stripHtmlComments(str) {
+  if (!str || typeof str !== "string") return "";
+  return str
+    .replace(/<!--[\s\S]*?(?:-->|--!>|$)/g, " ")
+    .replace(/<!(?:--)?\[[\s\S]*?\](?:--)?>/g, " ");
+}
+
+function normalizeAndExtractEmails(rawInput, filterCompliance = true) {
+  if (!rawInput || typeof rawInput !== "string") return [];
+
+  // Strip all HTML comments upfront. Emails inside commented-out sections
+  // (e.g. <!-- contact: old@example.com -->) must NEVER be extracted.
+  let text = stripHtmlComments(rawInput);
 
   // Hard cap — prevents catastrophic regex backtracking / high CPU on huge binary blobs or pages
   const MAX = 1_200_000; // 1.2 MB
-  if (rawText.length > MAX) rawText = rawText.slice(0, MAX);
+  if (text.length > MAX) text = text.slice(0, MAX);
 
   const found = new Set();
   function checkAndAdd(candidate) {
@@ -245,7 +256,7 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   // 1. Cloudflare __cf_email__ protected emails
   const cfRegex = /(?:data-cfemail=["']([0-9a-fA-F]+)["']|\/cdn-cgi\/l\/email-protection#([0-9a-fA-F]+))/gi;
   let cfMatch;
-  while ((cfMatch = cfRegex.exec(rawText)) !== null) {
+  while ((cfMatch = cfRegex.exec(text)) !== null) {
     const hex = cfMatch[1] || cfMatch[2];
     const decoded = decodeCloudflareEmail(hex);
     if (decoded) checkAndAdd(decoded);
@@ -254,7 +265,7 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   // 2. Base64 mailto payloads
   const b64MailtoRegex = /(?:atob\(['"]|data-mailto=['"]|value=['"])([a-zA-Z0-9+/=]{16,100})['"]/gi;
   let b64Match;
-  while ((b64Match = b64MailtoRegex.exec(rawText)) !== null) {
+  while ((b64Match = b64MailtoRegex.exec(text)) !== null) {
     const decoded = safeAtob(b64Match[1]);
     if (decoded && decoded.includes("@")) {
       for (const part of decoded.split(/[\s,"';<>]+/)) {
@@ -266,25 +277,22 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   // 3. ROT13 obfuscated emails
   const rot13Regex = /\b(?:rot13|nqqerff)\s*[:=]\s*['"]([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63})['"]/gi;
   let r13Match;
-  while ((r13Match = rot13Regex.exec(rawText)) !== null) {
+  while ((r13Match = rot13Regex.exec(text)) !== null) {
     const dec = decodeRot13(r13Match[1]);
     if (dec) checkAndAdd(dec);
   }
 
   // 4. HTML entity and percent-encoding de-obfuscation
-  let deobfuscated = decodeHtmlEntities(rawText);
+  let deobfuscated = decodeHtmlEntities(text);
   deobfuscated = deobfuscated
     .replace(/%40/gi, "@")
     .replace(/%2e/gi, ".")
     .replace(/%2f/gi, "/");
 
-  // 5. HTML comments inside emails (e.g. info<!-- antispam -->@domain.com)
-  deobfuscated = deobfuscated.replace(/<!--[\s\S]*?-->/g, "");
-
-  // 6. Split elements (e.g. <span class="u">sales</span>@<span class="d">company.com</span>)
+  // 5. Split elements (e.g. <span class="u">sales</span>@<span class="d">company.com</span>)
   deobfuscated = deobfuscated.replace(/<span[^>]*>([a-zA-Z0-9._%+-]+)<\/span>\s*@\s*<span[^>]*>([a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63})<\/span>/gi, "$1@$2");
 
-  // 7. Human text obfuscation: [at], (at), {at}, AT, [dot], (dot), {dot}, DOT (handles multi-level domains)
+  // 6. Human text obfuscation: [at], (at), {at}, AT, [dot], (dot), {dot}, DOT (handles multi-level domains)
   // NEVER replace bare lowercase 'at' or 'dot' as that corrupts English sentences like "viewed at www..." or "...or at all. It..."
   deobfuscated = deobfuscated
     .replace(/\s*(?:\[at\]|\(at\)|\{at\}|\[AT\]|\(AT\)|_at_|\/\*at\*\/)\s*/g, "@")
@@ -292,7 +300,7 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
     .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63})\b/g, "$1@$2")
     .replace(/\b([a-zA-Z0-9-]+)\s+(?:DOT)\s+([a-zA-Z0-9-]{2,63})\b/g, "$1.$2");
 
-  // 8. Spaced emails & PDF text fragmentation reconstruction
+  // 7. Spaced emails & PDF text fragmentation reconstruction
   // Multi-level domains: e.g. "company . co . uk" or "sub . domain . com"
   deobfuscated = deobfuscated.replace(/\b([a-zA-Z0-9-]{1,63})\s*\.\s*([a-zA-Z0-9-]{1,63})\s*\.\s*([a-zA-Z]{2,24})\b/g, "$1.$2.$3");
   // Single-level domains: e.g. "company . com"
@@ -303,11 +311,11 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   // Collapse whitespace around @: e.g. "info @ company.com" or "sales@ company.co.uk"
   deobfuscated = deobfuscated.replace(/\b([a-zA-Z0-9._%+-]{1,64})\s*@\s*([a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})\b/g, "$1@$2");
 
-  // 8.5. Extract from raw HTML attributes: value="", content="", data-*, action="", alt="", title=""
+  // 8. Extract from raw HTML attributes: value="", content="", data-*, action="", alt="", title=""
   // (NOTE: EXCLUDE placeholder="" so dummy form placeholders like name@email.co.uk are never extracted!)
   const attrRegex = /\b(?:value|content|data-[a-z0-9_-]+|action|alt|title)=["']([^"']+)["']/gi;
   let attrMatch;
-  while ((attrMatch = attrRegex.exec(rawText)) !== null) {
+  while ((attrMatch = attrRegex.exec(text)) !== null) {
     const val = attrMatch[1];
     if (val && val.includes("@")) {
       for (const p of val.split(/[\s,;]+/)) {
@@ -316,10 +324,10 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
     }
   }
 
-  // 8.6. Extract from SVG text elements (<text>, <tspan>, <desc>, <title>)
+  // 9. Extract from SVG text elements (<text>, <tspan>, <desc>, <title>)
   const svgTextRegex = /<(?:text|tspan|desc|title)\b[^>]*>([\s\S]*?)<\/(?:text|tspan|desc|title)>/gi;
   let svgMatch;
-  while ((svgMatch = svgTextRegex.exec(rawText)) !== null) {
+  while ((svgMatch = svgTextRegex.exec(text)) !== null) {
     const val = svgMatch[1];
     if (val && val.includes("@")) {
       const svgEmails = val.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63}/g) || [];
@@ -327,7 +335,7 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
     }
   }
 
-  // 9. Standard email extraction from cleaned text
+  // 10. Standard email extraction from cleaned text
   const cleanText = deobfuscated
     .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
     .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
@@ -339,10 +347,10 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
     checkAndAdd(m);
   }
 
-  // 10. Extract directly from all mailto links (handles cc, bcc, multi-recipient lists)
+  // 11. Extract directly from all mailto links (handles cc, bcc, multi-recipient lists)
   const mailtoFullRegex = /\bmailto:([^\s"'<>]+)/gi;
   let mfMatch;
-  while ((mfMatch = mailtoFullRegex.exec(rawText)) !== null) {
+  while ((mfMatch = mailtoFullRegex.exec(text)) !== null) {
     try {
       const decodedMailto = decodeURIComponent(mfMatch[1]);
       for (const p of decodedMailto.split(/[\s,;?&=]+/)) {
@@ -748,11 +756,19 @@ function updatePdfRecord(pdfRecord, status, emailsFound = pdfRecord.emailsFound 
   }).catch(() => {});
 }
 
-function extractAllLinksAndMedia(html) {
+function extractAllLinksAndMedia(rawHtml) {
   const rawLinks = [];
   const directPdfCandidates = new Set();
   const imageCandidates = [];
   const videoLinks = [];
+
+  if (!rawHtml || typeof rawHtml !== "string") {
+    return { rawLinks, directPdfCandidates, imageCandidates, videoLinks };
+  }
+
+  // Strip all HTML comments before searching for links or media
+  // (prevents extracting commented-out mailto links or child URLs)
+  const html = stripHtmlComments(rawHtml);
 
   // 1. Regular <a> links & data-href / data-url
   const aRegex = /<a\b([^>]*)>/gi;

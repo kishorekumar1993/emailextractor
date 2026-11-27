@@ -855,10 +855,22 @@ function decodeHtmlEntities(str) {
     .replace(/&gt;/gi, ">");
 }
 
-function normalizeAndExtractEmails(rawText, filterCompliance = true) {
-  if (!rawText || typeof rawText !== "string") return [];
+function stripPopupHtmlComments(str) {
+  if (!str || typeof str !== "string") return "";
+  return str
+    .replace(/<!--[\s\S]*?(?:-->|--!>|$)/g, " ")
+    .replace(/<!(?:--)?\[[\s\S]*?\](?:--)?>/g, " ");
+}
+
+function normalizeAndExtractEmails(rawInput, filterCompliance = true) {
+  if (!rawInput || typeof rawInput !== "string") return [];
+
+  // Strip all HTML comments upfront. Emails inside commented-out sections
+  // (e.g. <!-- contact: old@example.com -->) must NEVER be extracted.
+  let text = stripPopupHtmlComments(rawInput);
+
   const MAX = 1_200_000; // 1.2 MB hard cap prevents UI freeze on huge blobs
-  if (rawText.length > MAX) rawText = rawText.slice(0, MAX);
+  if (text.length > MAX) text = text.slice(0, MAX);
   const found = new Set();
 
   function checkAndAdd(candidate) {
@@ -872,14 +884,14 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   // 1. Cloudflare __cf_email__ protected emails
   const cfRegex = /(?:data-cfemail=["']([0-9a-fA-F]+)["']|\/cdn-cgi\/l\/email-protection#([0-9a-fA-F]+))/gi;
   let cfMatch;
-  while ((cfMatch = cfRegex.exec(rawText)) !== null) {
+  while ((cfMatch = cfRegex.exec(text)) !== null) {
     const hex = cfMatch[1] || cfMatch[2];
     const decoded = decodeCloudflareEmail(hex);
     if (decoded) checkAndAdd(decoded);
   }
 
   // 2. Decode HTML entities and URL hex encodings
-  let deobf = decodeHtmlEntities(rawText)
+  let deobf = decodeHtmlEntities(text)
     .replace(/%40/gi, "@")
     .replace(/%2e/gi, ".")
     .replace(/\s*(?:\[at\]|\(at\)|\{at\}|\[AT\]|\(AT\)|_at_|\/\*at\*\/)\s*/g, "@")
@@ -896,7 +908,7 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   // 3. Raw HTML attributes (value, content, data-*, alt, title)
   const attrRegex = /\b(?:value|content|data-[a-z0-9_-]+|action|alt|title)=["']([^"']+)["']/gi;
   let attrMatch;
-  while ((attrMatch = attrRegex.exec(rawText)) !== null) {
+  while ((attrMatch = attrRegex.exec(text)) !== null) {
     const val = attrMatch[1];
     if (val && val.includes("@")) {
       for (const p of val.split(/[\s,;]+/)) {
@@ -906,8 +918,12 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   }
 
   // 4. Standard email regex
+  const cleanText = deobf
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
+    .replace(/<[^>]+>/g, " ");
   const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63}/g;
-  const matches = deobf.match(regex) || [];
+  const matches = cleanText.match(regex) || [];
   for (const m of matches) {
     checkAndAdd(m);
   }
@@ -915,7 +931,7 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
   // 5. Direct mailto links
   const mailtoRegex = /\bmailto:([^\s"'<>]+)/gi;
   let mMatch;
-  while ((mMatch = mailtoRegex.exec(rawText)) !== null) {
+  while ((mMatch = mailtoRegex.exec(text)) !== null) {
     try {
       const decodedMailto = decodeURIComponent(mMatch[1]);
       for (const p of decodedMailto.split(/[\s,;?&=]+/)) {
@@ -1268,8 +1284,15 @@ startBtn.addEventListener("click", async () => {
             }
           }
 
-          const pageHtml = document.documentElement ? document.documentElement.outerHTML : document.body.innerHTML;
-          harvestText(pageHtml);
+          const rawHtml = document.documentElement ? document.documentElement.outerHTML : (document.body ? document.body.innerHTML : "");
+          // Strip all HTML comments, conditional comments, scripts, and styles
+          // so commented-out emails or script comments are never harvested
+          const cleanHtml = (rawHtml || "")
+            .replace(/<!--[\s\S]*?(?:-->|--!>|$)/g, " ")
+            .replace(/<!(?:--)?\[[\s\S]*?\](?:--)?>/g, " ")
+            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script\s*>/gi, " ")
+            .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style\s*>/gi, " ");
+          harvestText(cleanHtml);
 
           document.querySelectorAll("a[href^='mailto:']").forEach((a) => {
             harvestText(decodeURIComponent(a.href));
