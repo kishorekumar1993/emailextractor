@@ -142,6 +142,13 @@ function startStatusPoll() {
       if (res.crawlId && currentCrawlId && res.crawlId !== currentCrawlId) {
         return; // Ignore responses from previous or superseded crawls
       }
+      if (res.stats) {
+        if (res.stats.pagesCrawled !== undefined) statPages.textContent = res.stats.pagesCrawled;
+        if (res.stats.pdfsChecked !== undefined) statPdfs.textContent = res.stats.pdfsChecked;
+      }
+      if (Array.isArray(res.findings)) {
+        for (const f of res.findings) registerFoundEmail(f);
+      }
       if (!res.isCrawling && isCrawling) {
         isCrawling = false;
         startBtn.style.display = "inline-flex";
@@ -153,7 +160,7 @@ function startStatusPoll() {
         stopStatusPoll();
       }
     } catch {}
-  }, 2500);
+  }, 800);
 }
 
 function stopStatusPoll() {
@@ -252,6 +259,12 @@ function appendEmailRow(finding) {
   const normEmail = (finding.copy || finding.email).toLowerCase();
   const existingTr = emailRowsMap.get(normEmail);
 
+  const isMatch = isEmailDomainMatch(normEmail);
+  if (onlyDomainEmailsCheckbox && onlyDomainEmailsCheckbox.checked && !isMatch) {
+    if (existingTr) existingTr.style.display = "none";
+    return;
+  }
+
   let typeBadgeClass = "type-html";
   const st = (finding.sourceType || "").toLowerCase();
   if (st.includes("pdf")) {
@@ -266,7 +279,6 @@ function appendEmailRow(finding) {
   const mainPageUrl = getFindingMainPageUrl(finding);
   const pdfUrl = getFindingPdfUrl(finding);
 
-  const isMatch = isEmailDomainMatch(normEmail);
   const domainBadgeHtml = isMatch
     ? `<span class="domain-badge domain-match" title="Direct match with website domain">✓ Domain Match</span>`
     : `<span class="domain-badge domain-external" title="External or ISP email address">ISP / External</span>`;
@@ -280,6 +292,7 @@ function appendEmailRow(finding) {
   `;
 
   if (existingTr) {
+    existingTr.style.display = "";
     existingTr.innerHTML = rowHtml;
   } else {
     // If first row, clear empty-state placeholder
@@ -316,12 +329,13 @@ function getFindingPdfUrl(finding) {
 
 function registerFoundEmail(finding) {
   if (!finding || !finding.email) return;
-  const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : true;
+  const isStrict = filterComplianceCheckbox ? filterComplianceCheckbox.checked : false;
   if (!isPopupValidEmail(finding.email, isStrict)) return;
 
   const normEmail = finding.email.toLowerCase();
   const idx = currentFindings.findIndex((f) => f.email.toLowerCase() === normEmail);
 
+  let targetItem = finding;
   if (idx !== -1) {
     const existing = currentFindings[idx];
     const incomingSources = Array.isArray(finding.sources) ? finding.sources : [{
@@ -342,11 +356,19 @@ function registerFoundEmail(finding) {
     existing.occurrences = Math.max(existing.occurrences || 1, existing.sources.length);
     if (!existing.pdf && finding.pdf) existing.pdf = finding.pdf;
     if (!existing.mainPageUrl && finding.mainPageUrl) existing.mainPageUrl = finding.mainPageUrl;
+    targetItem = existing;
   } else {
     currentFindings.push(finding);
   }
 
-  applyCurrentSearchFilter();
+  // Smooth in-place append/update: avoid wiping entire table on every email
+  const q = searchInput ? searchInput.value.trim().toLowerCase() : "";
+  if (q) {
+    applyCurrentSearchFilter();
+  } else {
+    appendEmailRow(targetItem);
+  }
+
   statEmails.textContent = getVisibleFindings().length;
   updateActionButtons();
 }
@@ -416,6 +438,37 @@ function renderPdfRows(items) {
   }
 }
 
+function extractPopupPdfPageText(items) {
+  let text = "";
+  let rawLine = "";
+  let fullRaw = "";
+  let previous = null;
+  for (const item of items) {
+    if (!item || typeof item.str !== "string" || !item.str) continue;
+    const transform = item.transform || [];
+    const x = Number(transform[4]) || 0;
+    const y = Number(transform[5]) || 0;
+    const fontSize = Math.abs(Number(transform[3]) || Number(transform[0]) || 10);
+    if (previous) {
+      const sameLine = Math.abs(y - previous.y) < Math.max(1, fontSize * 0.45);
+      const gap = x - (previous.x + previous.width);
+      const isEmailGlue = (previous.str.endsWith("@") || previous.str.endsWith(".") || item.str.startsWith("@") || item.str.startsWith("."));
+      if (item.hasEOL || !sameLine) {
+        text += "\n";
+        fullRaw += " " + rawLine;
+        rawLine = "";
+      } else if (gap > fontSize * 0.25 && !isEmailGlue) {
+        text += " ";
+      }
+    }
+    text += item.str;
+    rawLine += item.str;
+    previous = { x, y, width: Number(item.width) || 0, str: item.str };
+  }
+  fullRaw += " " + rawLine;
+  return text + "\n" + fullRaw;
+}
+
 async function scanPdfPageImages(pdfUrl, pdfRecord) {
   if (!globalThis.pdfjsLib || !globalThis.Tesseract) {
     throw new Error("The local PDF/OCR libraries did not load. Reload the extension and try again.");
@@ -447,20 +500,39 @@ async function scanPdfPageImages(pdfUrl, pdfRecord) {
   const emails = new Set();
   try {
     pdf = await loadingTask.promise;
-    const pagesToScan = Math.min(pdf.numPages, 50);
+    const pagesToScan = Math.min(pdf.numPages, 100);
     const pagesNeedingOcr = [];
     for (let pageNumber = 1; pageNumber <= pagesToScan; pageNumber++) {
       let page;
       try {
         page = await pdf.getPage(pageNumber);
-        const content = await page.getTextContent();
-        const pageText = (content.items || [])
-          .filter((item) => typeof item.str === "string")
-          .map((item) => item.str)
-          .join(" ");
+        const [content, annotations] = await Promise.all([
+          page.getTextContent(),
+          page.getAnnotations({ intent: "display" })
+        ]);
+        const pageText = extractPopupPdfPageText(content.items || []);
         const pageEmails = normalizeAndExtractEmails(pageText, strict);
         for (const email of pageEmails) emails.add(email);
-        if (pageEmails.length === 0) pagesNeedingOcr.push(pageNumber);
+
+        for (const annotation of (annotations || [])) {
+          const rawUrl = annotation.url || annotation.unsafeUrl || "";
+          if (rawUrl) {
+            try {
+              const decoded = decodeURIComponent(rawUrl);
+              if (/^mailto:/i.test(decoded)) {
+                const mailtoClean = decoded.replace(/^mailto:/i, "").split(/[?&#]/)[0].trim();
+                for (const em of normalizeAndExtractEmails(mailtoClean, strict)) emails.add(em);
+              }
+              for (const em of normalizeAndExtractEmails(decoded, strict)) emails.add(em);
+            } catch {
+              for (const em of normalizeAndExtractEmails(rawUrl, strict)) emails.add(em);
+            }
+          }
+        }
+
+        if (pageEmails.length === 0 && (!annotations || annotations.length === 0)) {
+          pagesNeedingOcr.push(pageNumber);
+        }
       } catch (error) {
         pagesFailed++;
         console.debug(`PDF text extraction failed on page ${pageNumber}:`, error);
@@ -698,7 +770,7 @@ const POPUP_VALID_TLDS = new Set([
 
 const POPUP_DUMMY_DOMAINS = new Set([
   "email.com", "email.co.uk", "example.com", "example.org", "example.net", "example.co.uk",
-  "domain.com", "domain.co.uk", "sample.com", "sample.co.uk", "test.com", "test.co.uk", "testing.com",
+  "domain.com", "domain.co.uk", "sample.com", "sample.co.uk", "test.com", "test.co.uk",
   "yourdomain.com", "yourcompany.com", "yoursite.com", "mycompany.com", "company.com", "site.com",
   "website.com", "somedomain.com", "sentry.io", "wixpress.com", "wordpress.com", "cookiebot.com",
   "onetrust.com", "cloudflare.com", "gravatar.com"
@@ -814,8 +886,11 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
     .replace(/\s*(?:\[dot\]|\(dot\)|\{dot\}|\[DOT\]|\(DOT\)|_dot_|\/\*dot\*\/)\s*/g, ".")
     .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63})\b/g, "$1@$2")
     .replace(/\b([a-zA-Z0-9-]+)\s+(?:DOT)\s+([a-zA-Z0-9-]{2,63})\b/g, "$1.$2")
-    .replace(/\b([a-zA-Z0-9_%+-]{1,40})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z0-9-]{2,63})\b/g, "$1@$2.$3")
-    .replace(/\b([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z0-9-]{2,63})\b/g, "$1.$2@$3.$4")
+    .replace(/\b([a-zA-Z0-9-]{1,63})\s*\.\s*([a-zA-Z0-9-]{1,63})\s*\.\s*([a-zA-Z]{2,24})\b/g, "$1.$2.$3")
+    .replace(/\b([a-zA-Z0-9-]{1,63})\s*\.\s*([a-zA-Z]{2,24})\b/g, "$1.$2")
+    .replace(/\b([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*@/g, "$1.$2.$3@")
+    .replace(/\b([a-zA-Z0-9_%+-]{1,40})\s*\.\s*([a-zA-Z0-9_%+-]{1,40})\s*@/g, "$1.$2@")
+    .replace(/\b([a-zA-Z0-9._%+-]{1,64})\s*@\s*([a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})\b/g, "$1@$2")
     .replace(/@([a-zA-Z0-9-]+),([a-zA-Z]{2,10})/g, "@$1.$2");
 
   // 3. Raw HTML attributes (value, content, data-*, alt, title)
@@ -911,15 +986,6 @@ chrome.runtime.onMessage.addListener((msg) => {
       p.status = msg.status || p.status;
       p.emailsFound = msg.emailsFound !== undefined ? msg.emailsFound : p.emailsFound;
       appendPdfRow(p);
-      if (p.emailsFound === 0 && (/^Scanned \(0 emails/i.test(p.status) || /^Failed:/i.test(p.status))) {
-        runPdfOcr(p.url, p).then((result) => {
-          statusText.textContent = `PDF text/OCR scan completed. Found ${result.emails.length} email${result.emails.length === 1 ? "" : "s"}.`;
-        }).catch((error) => {
-          p.status = `OCR failed: ${error.message || "Unable to scan PDF."}`;
-          appendPdfRow(p);
-          statusText.textContent = p.status;
-        });
-      }
     }
   }
 
@@ -1102,6 +1168,43 @@ if (scanPdfBtn) {
   });
 }
 
+async function findMatchingTab(targetUrl) {
+  try {
+    if (!targetUrl) return null;
+    let targetHost = "";
+    try {
+      targetHost = new URL(targetUrl.startsWith("http") ? targetUrl : `https://${targetUrl}`).hostname.replace(/^www\./i, "").toLowerCase();
+    } catch {
+      return null;
+    }
+
+    // 1. Try active tab in current/last focused window first
+    const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (activeTabs && activeTabs[0] && activeTabs[0].url && !activeTabs[0].url.startsWith("chrome-extension://")) {
+      try {
+        const h = new URL(activeTabs[0].url).hostname.replace(/^www\./i, "").toLowerCase();
+        if (targetHost === h || targetHost.endsWith("." + h) || h.endsWith("." + targetHost)) {
+          return activeTabs[0];
+        }
+      } catch {}
+    }
+
+    // 2. Search all tabs across all windows for a matching domain tab
+    const allTabs = await chrome.tabs.query({});
+    for (const t of allTabs) {
+      if (t.id && t.url && (t.url.startsWith("http://") || t.url.startsWith("https://"))) {
+        try {
+          const h = new URL(t.url).hostname.replace(/^www\./i, "").toLowerCase();
+          if (targetHost === h || targetHost.endsWith("." + h) || h.endsWith("." + targetHost)) {
+            return t;
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+  return null;
+}
+
 // ── Start Crawl Handler ──────────────────────────────────────────────
 startBtn.addEventListener("click", async () => {
   let targetUrl = targetUrlInput ? targetUrlInput.value.trim() : "";
@@ -1134,42 +1237,73 @@ startBtn.addEventListener("click", async () => {
   let initialFindings = [];
   let initialLinks = [];
   try {
-    const activeTab = await detectActiveTab();
-    if (activeTab && activeTab.id && activeTab.url && (activeTab.url.startsWith("http://") || activeTab.url.startsWith("https://"))) {
-      // Only harvest live DOM from the active tab if it belongs to the target domain being crawled
-      let isSameTargetDomain = false;
-      try {
-        const targetHost = new URL(targetUrl).hostname.replace(/^www\./i, "").toLowerCase();
-        const tabHost = new URL(activeTab.url).hostname.replace(/^www\./i, "").toLowerCase();
-        if (targetHost === tabHost || targetHost.endsWith("." + tabHost) || tabHost.endsWith("." + targetHost)) {
-          isSameTargetDomain = true;
-        }
-      } catch {}
+    const matchingTab = await findMatchingTab(targetUrl);
+    if (matchingTab && matchingTab.id) {
+      const execRes = await chrome.scripting.executeScript({
+        target: { tabId: matchingTab.id },
+        func: () => {
+          const emails = new Set();
+          const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24}/g;
 
-      if (isSameTargetDomain) {
-        const execRes = await chrome.scripting.executeScript({
-          target: { tabId: activeTab.id },
-          func: () => {
-            const links = Array.from(document.querySelectorAll("a[href], [data-href], [data-url], iframe[src], embed[src]"))
-              .map((el) => el.getAttribute("href") || el.getAttribute("data-href") || el.getAttribute("data-url") || el.getAttribute("src"))
-              .filter(Boolean);
-            const pageHtml = document.documentElement ? document.documentElement.outerHTML : document.body.innerHTML;
-            return { links, pageHtml };
+          function decodeCf(hex) {
+            try {
+              const k = parseInt(hex.slice(0, 2), 16);
+              let s = "";
+              for (let i = 2; i < hex.length; i += 2) s += String.fromCharCode(parseInt(hex.slice(i, i + 2), 16) ^ k);
+              return s;
+            } catch { return ""; }
           }
-        });
 
-        if (execRes && execRes[0] && execRes[0].result) {
-          initialLinks = execRes[0].result.links || [];
-          const isStrict = !!(filterComplianceCheckbox && filterComplianceCheckbox.checked);
-          const domEmails = normalizeAndExtractEmails(execRes[0].result.pageHtml || "", isStrict);
-          for (const em of domEmails) {
+          function harvestText(txt) {
+            if (!txt) return;
+            const cfRegex = /(?:data-cfemail=["']([a-f0-9]+)["']|\/cdn-cgi\/l\/email-protection#([a-f0-9]+))/gi;
+            let cfM;
+            while ((cfM = cfRegex.exec(txt)) !== null) {
+              const dec = decodeCf(cfM[1] || cfM[2]);
+              if (dec && dec.includes("@")) emails.add(dec.toLowerCase());
+            }
+            let m;
+            while ((m = emailRegex.exec(txt)) !== null) {
+              emails.add(m[0].toLowerCase());
+            }
+          }
+
+          const pageHtml = document.documentElement ? document.documentElement.outerHTML : document.body.innerHTML;
+          harvestText(pageHtml);
+
+          document.querySelectorAll("a[href^='mailto:']").forEach((a) => {
+            harvestText(decodeURIComponent(a.href));
+          });
+
+          const links = [];
+          document.querySelectorAll("a[href], [data-href], [data-url]").forEach((el) => {
+            const h = el.getAttribute("href") || el.getAttribute("data-href") || el.getAttribute("data-url");
+            if (h && !h.startsWith("#") && !h.startsWith("javascript:") && !h.startsWith("data:")) {
+              links.push(h);
+            }
+          });
+
+          return {
+            links: Array.from(new Set(links)).slice(0, 200),
+            emails: Array.from(emails)
+          };
+        }
+      });
+
+      if (execRes && execRes[0] && execRes[0].result) {
+        const resObj = execRes[0].result;
+        initialLinks = resObj.links || [];
+        const isStrict = !!(filterComplianceCheckbox && filterComplianceCheckbox.checked);
+
+        for (const em of (resObj.emails || [])) {
+          if (isPopupValidEmail(em, isStrict)) {
             const item = {
               email: em,
               sourceType: "HTML (Live Tab)",
-              sourceUrl: activeTab.url,
-              mainPageUrl: activeTab.url,
+              sourceUrl: matchingTab.url,
+              mainPageUrl: matchingTab.url,
               occurrences: 1,
-              sources: [{ sourceType: "HTML (Live Tab)", sourceUrl: activeTab.url, mainPageUrl: activeTab.url, timestamp: new Date().toISOString() }]
+              sources: [{ sourceType: "HTML (Live Tab)", sourceUrl: matchingTab.url, mainPageUrl: matchingTab.url, timestamp: new Date().toISOString() }]
             };
             initialFindings.push(item);
             registerFoundEmail(item);
@@ -1503,17 +1637,6 @@ function syncCrawlState(res) {
       }
     }
     renderPdfRows(currentPdfs);
-    for (const pdf of currentPdfs) {
-      if (pdf.emailsFound === 0 && (/^Scanned \(0 emails/i.test(pdf.status || "") || /^Failed:/i.test(pdf.status || ""))) {
-        runPdfOcr(pdf.url, pdf).then((result) => {
-          statusText.textContent = `PDF text/OCR scan completed. Found ${result.emails.length} email${result.emails.length === 1 ? "" : "s"}.`;
-        }).catch((error) => {
-          pdf.status = `OCR failed: ${error.message || "Unable to scan PDF."}`;
-          appendPdfRow(pdf);
-          statusText.textContent = pdf.status;
-        });
-      }
-    }
   }
 
   if (Array.isArray(res.discoveredImages) && res.discoveredImages.length > 0) {

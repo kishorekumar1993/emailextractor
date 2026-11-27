@@ -283,16 +283,16 @@ function normalizeAndExtractEmails(rawText, filterCompliance = true) {
     .replace(/\b([a-zA-Z0-9._%+-]{2,30})\s+(?:AT)\s+([a-zA-Z0-9.-]+\.[a-zA-Z0-9-]{2,63})\b/g, "$1@$2")
     .replace(/\b([a-zA-Z0-9-]+)\s+(?:DOT)\s+([a-zA-Z0-9-]{2,63})\b/g, "$1.$2");
 
-  // 8. Spaced emails: "info @ company . com" (bounded, safe, no nested quantifiers)
-  deobfuscated = deobfuscated.replace(
-    /\b([a-zA-Z0-9_%+-]{1,40})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z0-9-]{2,63})\b/g,
-    "$1@$2.$3"
-  );
-  // Second pass for dotted local part e.g. "first . last @ domain . com" (safe bounded)
-  deobfuscated = deobfuscated.replace(
-    /\b([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*@\s*([a-zA-Z0-9-]{1,40})\s*\.\s*([a-zA-Z0-9-]{2,63})\b/g,
-    "$1.$2@$3.$4"
-  );
+  // 8. Spaced emails & PDF text fragmentation reconstruction
+  // Multi-level domains: e.g. "company . co . uk" or "sub . domain . com"
+  deobfuscated = deobfuscated.replace(/\b([a-zA-Z0-9-]{1,63})\s*\.\s*([a-zA-Z0-9-]{1,63})\s*\.\s*([a-zA-Z]{2,24})\b/g, "$1.$2.$3");
+  // Single-level domains: e.g. "company . com"
+  deobfuscated = deobfuscated.replace(/\b([a-zA-Z0-9-]{1,63})\s*\.\s*([a-zA-Z]{2,24})\b/g, "$1.$2");
+  // Multi-part local parts: e.g. "first . middle . last @" or "first . last @"
+  deobfuscated = deobfuscated.replace(/\b([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*\.\s*([a-zA-Z0-9_%+-]{1,30})\s*@/g, "$1.$2.$3@");
+  deobfuscated = deobfuscated.replace(/\b([a-zA-Z0-9_%+-]{1,40})\s*\.\s*([a-zA-Z0-9_%+-]{1,40})\s*@/g, "$1.$2@");
+  // Collapse whitespace around @: e.g. "info @ company.com" or "sales@ company.co.uk"
+  deobfuscated = deobfuscated.replace(/\b([a-zA-Z0-9._%+-]{1,64})\s*@\s*([a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})\b/g, "$1@$2");
 
   // 8.5. Extract from raw HTML attributes: value="", content="", data-*, action="", alt="", title=""
   // (NOTE: EXCLUDE placeholder="" so dummy form placeholders like name@email.co.uk are never extracted!)
@@ -577,6 +577,8 @@ function getPdfJsLibrary() {
 
 function extractPdfPageText(items) {
   let text = "";
+  let rawLine = "";
+  let fullRaw = "";
   let previous = null;
   for (const item of items) {
     if (!item || typeof item.str !== "string" || !item.str) continue;
@@ -585,14 +587,23 @@ function extractPdfPageText(items) {
     const y = Number(transform[5]) || 0;
     const fontSize = Math.abs(Number(transform[3]) || Number(transform[0]) || 10);
     if (previous) {
-      const sameLine = Math.abs(y - previous.y) < Math.max(1, fontSize * 0.4);
+      const sameLine = Math.abs(y - previous.y) < Math.max(1, fontSize * 0.45);
       const gap = x - (previous.x + previous.width);
-      text += item.hasEOL || !sameLine ? "\n" : (gap > fontSize * 0.15 ? " " : "");
+      const isEmailGlue = (previous.str.endsWith("@") || previous.str.endsWith(".") || item.str.startsWith("@") || item.str.startsWith("."));
+      if (item.hasEOL || !sameLine) {
+        text += "\n";
+        fullRaw += " " + rawLine;
+        rawLine = "";
+      } else if (gap > fontSize * 0.25 && !isEmailGlue) {
+        text += " ";
+      }
     }
     text += item.str;
-    previous = { x, y, width: Number(item.width) || 0 };
+    rawLine += item.str;
+    previous = { x, y, width: Number(item.width) || 0, str: item.str };
   }
-  return text;
+  fullRaw += " " + rawLine;
+  return text + "\n" + fullRaw;
 }
 
 async function extractEmailsFromPdfBytes(buffer, filterCompliance = true) {
@@ -614,9 +625,16 @@ async function extractEmailsFromPdfBytes(buffer, filterCompliance = true) {
     pdf = await loadingTask.promise;
     const annotationTexts = [];
     const emails = new Set();
-    const pagesToScan = Math.min(pdf.numPages, 500);
+    const totalPages = pdf.numPages;
+    // Scan all pages up to 100 pages sequentially so no middle sections or price/contact pages are skipped
+    const maxPages = Math.min(totalPages, 100);
+    const pageNumbersToScan = [];
+    for (let p = 1; p <= maxPages; p++) {
+      pageNumbersToScan.push(p);
+    }
+    const pagesScannedCount = pageNumbersToScan.length;
     let pagesFailed = 0;
-    for (let pageNumber = 1; pageNumber <= pagesToScan; pageNumber++) {
+    for (const pageNumber of pageNumbersToScan) {
       let page;
       try {
         page = await pdf.getPage(pageNumber);
@@ -628,9 +646,19 @@ async function extractEmailsFromPdfBytes(buffer, filterCompliance = true) {
         for (const email of normalizeAndExtractEmails(pageText, filterCompliance)) {
           emails.add(email);
         }
-        for (const annotation of annotations) {
-          if (annotation.url) annotationTexts.push(annotation.url);
-          if (annotation.unsafeUrl) annotationTexts.push(annotation.unsafeUrl);
+        for (const annotation of (annotations || [])) {
+          const rawUrl = annotation.url || annotation.unsafeUrl || "";
+          if (rawUrl) {
+            annotationTexts.push(rawUrl);
+            try {
+              const decoded = decodeURIComponent(rawUrl);
+              annotationTexts.push(decoded);
+              if (/^mailto:/i.test(decoded)) {
+                const mailtoClean = decoded.replace(/^mailto:/i, "").split(/[?&#]/)[0].trim();
+                if (mailtoClean) annotationTexts.push(mailtoClean);
+              }
+            } catch {}
+          }
         }
       } catch (error) {
         pagesFailed++;
@@ -645,8 +673,7 @@ async function extractEmailsFromPdfBytes(buffer, filterCompliance = true) {
     }
     let usedFallback = false;
 
-    // Keep the low-level extractor as a fallback for malformed PDFs and encodings
-    // that PDF.js cannot decode, while preferring its Unicode text output.
+    // Run low-level basic PDF parser fallback if 0 emails found or to supplement sparse extractions
     if (emails.size === 0) {
       usedFallback = true;
       const fallbackText = await extractDeepPdfText(new Uint8Array(buffer));
@@ -657,7 +684,7 @@ async function extractEmailsFromPdfBytes(buffer, filterCompliance = true) {
 
     return {
       emails: Array.from(emails),
-      pagesScanned: pagesToScan,
+      pagesScanned: pagesScannedCount,
       totalPages: pdf.numPages,
       pagesFailed,
       usedFallback
@@ -692,22 +719,17 @@ function extractAllLinksAndMedia(html) {
   const videoLinks = [];
 
   // 1. Regular <a> links & data-href / data-url
-  const aRegex = /<a\b([^>]*)>(?:([\s\S]*?)<\/a>)?/gi;
+  const aRegex = /<a\b([^>]*)>/gi;
   let aMatch;
   while ((aMatch = aRegex.exec(html)) !== null) {
     const attrs = aMatch[1] || "";
-    const innerText = aMatch[2] || "";
     const hrefMatch = attrs.match(/\b(?:href|data-href|data-url)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
     const href = hrefMatch ? hrefMatch[1] || hrefMatch[2] || hrefMatch[3] : "";
     if (href) {
       const trimmed = href.trim();
       if (trimmed && !trimmed.startsWith("javascript:") && !trimmed.startsWith("#")) {
         rawLinks.push(trimmed);
-        if (isPdfUrl(trimmed) || /\.pdf\b/i.test(innerText) || /(?:download\s+(?:catalog|brochure|spec|pdf|document)|pdf\s+download|e-catalog|datasheet)/i.test(innerText)) {
-          directPdfCandidates.add(trimmed);
-        }
-        // Detect download script endpoints that serve documents/catalogs
-        if (/(?:download_file\.asp|download\.php|getfile\.aspx|download\.aspx)\?[^"'\s>]*fid=/i.test(trimmed)) {
+        if (isPdfUrl(trimmed) || /(?:download_file\.asp|download\.php|getfile\.aspx|download\.aspx)\?[^"'\s>]*fid=/i.test(trimmed)) {
           directPdfCandidates.add(trimmed);
         }
         // Detect video / animation links
@@ -901,19 +923,19 @@ async function probeSitemaps(baseOrigin, abortSignal) {
 
   // Recursively fetch sub-sitemaps (e.g. sitemapen_site.xml, sitemap_products.xml)
   if (subSitemapXmlUrls.size > 0 && !abortSignal?.aborted) {
-    const subList = Array.from(subSitemapXmlUrls).slice(0, 8);
+    const subList = Array.from(subSitemapXmlUrls).slice(0, 3);
     const subPromises = subList.map(async (subUrl) => {
       try {
         if (abortSignal && abortSignal.aborted) return;
         const res = await fetch(subUrl, {
           credentials: "omit",
           headers: { "Accept": "text/xml,application/xml,*/*" },
-          signal: getSignal(3000)
+          signal: getSignal(2000)
         });
         if (!res.ok) return;
         const xml = await res.text();
         const subLocs = xml.match(/<loc>([^<]+)<\/loc>/gi) || [];
-        for (const l of subLocs.slice(0, 300)) {
+        for (const l of subLocs.slice(0, 80)) {
           const u = l.replace(/<\/?loc>/gi, "").trim();
           if (u && !seen.has(u) && !u.toLowerCase().endsWith(".xml")) {
             seen.add(u);
@@ -1082,7 +1104,7 @@ async function runProductionCrawl(crawlState) {
   const crawlAbortController = new AbortController();
   crawlState.abortController = crawlAbortController;
 
-  function createFetchSignal(timeoutMs = 7500) {
+  function createFetchSignal(timeoutMs = 10000) {
     if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
       return AbortSignal.any([AbortSignal.timeout(timeoutMs), crawlAbortController.signal]);
     }
@@ -1093,7 +1115,14 @@ async function runProductionCrawl(crawlState) {
     return ctrl.signal;
   }
 
-  const initialUrl = cleanAndNormalizeUrl(startUrl, startUrl);
+  let initialUrl = cleanAndNormalizeUrl(startUrl, startUrl);
+  if (initialUrl && initialUrl.startsWith("http://")) {
+    const secureUrl = initialUrl.replace(/^http:\/\//i, "https://");
+    initialUrl = secureUrl;
+    try {
+      baseOrigin = new URL(secureUrl).origin;
+    } catch {}
+  }
   const htmlQueue = [initialUrl];
   const pdfQueue = [];
 
@@ -1232,6 +1261,7 @@ async function runProductionCrawl(crawlState) {
   });
 
   // Ingest initial links from active tab right after initialUrl
+  let hasContactLink = false;
   if (Array.isArray(initialLinks)) {
     for (const rawL of initialLinks) {
       if (crawlState.aborted) break;
@@ -1246,6 +1276,7 @@ async function runProductionCrawl(crawlState) {
         if (!enqueuedHtmlUrls.has(cUrl) && htmlQueue.length + visitedUrls.size < maxPages) {
           enqueuedHtmlUrls.add(cUrl);
           if (HIGH_PRIORITY_REGEX.test(cUrl)) {
+            hasContactLink = true;
             // Priority links go right behind initialUrl
             htmlQueue.splice(1, 0, cUrl);
           } else {
@@ -1256,18 +1287,19 @@ async function runProductionCrawl(crawlState) {
     }
   }
 
-  // Sensible fallback contact paths on base origin, appended at end of queue
-  const standardFallbackPaths = [
-    "/contact.html", "/contact-us.html", "/contact_us.html", "/contact",
-    "/about.html", "/about-us.html", "/about_us.html", "/about",
-    "/company-profile.html", "/inquiry.html", "/e-catalog.html"
-  ];
-  for (const p of standardFallbackPaths) {
-    if (htmlQueue.length + visitedUrls.size >= maxPages) break;
-    const cUrl = cleanAndNormalizeUrl(`${baseOrigin}${p}`, startUrl);
-    if (cUrl && !enqueuedHtmlUrls.has(cUrl)) {
-      enqueuedHtmlUrls.add(cUrl);
-      htmlQueue.push(cUrl);
+  // Sensible fallback contact paths on base origin ONLY if no contact links were found
+  if (!hasContactLink) {
+    const standardFallbackPaths = [
+      "/contact-us", "/contact", "/about-us", "/about",
+      "/contact.html", "/about.html"
+    ];
+    for (const p of standardFallbackPaths) {
+      if (htmlQueue.length + visitedUrls.size >= maxPages) break;
+      const cUrl = cleanAndNormalizeUrl(`${baseOrigin}${p}`, startUrl);
+      if (cUrl && !enqueuedHtmlUrls.has(cUrl)) {
+        enqueuedHtmlUrls.add(cUrl);
+        htmlQueue.push(cUrl);
+      }
     }
   }
 
@@ -1302,10 +1334,14 @@ async function runProductionCrawl(crawlState) {
         }
       }
       if (prioritySeeds.length > 0) {
-        htmlQueue.unshift(...prioritySeeds.slice(-200));
+        // Priority contact links go to the front
+        htmlQueue.unshift(...prioritySeeds.slice(-50));
       }
-      if (normalSeeds.length > 0 && htmlQueue.length < maxPages) {
-        htmlQueue.push(...normalSeeds.slice(0, maxPages - htmlQueue.length));
+      // Never flood queue with hundreds of generic product/catalog sitemap URLs!
+      // Only keep up to 15 normal links if queue is running low
+      if (normalSeeds.length > 0 && htmlQueue.length < Math.min(20, maxPages)) {
+        const take = Math.min(15, maxPages - htmlQueue.length);
+        htmlQueue.push(...normalSeeds.slice(0, take));
       }
     })
     .catch(() => {})
@@ -1397,7 +1433,7 @@ async function runProductionCrawl(crawlState) {
         const res = await fetch(currentUrl, {
           credentials: "include",
           headers: STANDARD_FETCH_HEADERS,
-          signal: createFetchSignal(7500)
+          signal: createFetchSignal(currentUrl === initialUrl ? 15000 : 10000)
         });
         if (!res.ok) {
           console.debug("HTML response non-OK:", res.status, currentUrl);
@@ -1425,7 +1461,16 @@ async function runProductionCrawl(crawlState) {
           return;
         }
 
-        html = await res.text();
+        const contentLength = parseInt(res.headers.get("content-length") || "0", 10);
+        if (contentLength > 5 * 1024 * 1024) {
+          // Skip giant files > 5MB to avoid memory pressure and hang
+          return;
+        }
+
+        html = await Promise.race([
+          res.text(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout reading HTML body")), 10000))
+        ]);
       } catch {
         return;
       }
@@ -1441,11 +1486,9 @@ async function runProductionCrawl(crawlState) {
         }
       }
 
-      // Extract all emails from text, HTML source, and mailto links
-      const textMatches = normalizeAndExtractEmails(text, filterCompliance);
+      // Extract all emails from HTML source (includes text, attributes, scripts, and mailto links)
       const htmlMatches = normalizeAndExtractEmails(html, filterCompliance);
-      const allMatches = new Set([...textMatches, ...htmlMatches]);
-      for (const m of allMatches) {
+      for (const m of htmlMatches) {
         recordCleanEmail(m, finalUrl, "html", finalUrl);
       }
 
@@ -1457,16 +1500,18 @@ async function runProductionCrawl(crawlState) {
 
           if (!discoveredImagesSet.has(fullImgUrl)) {
             discoveredImagesSet.add(fullImgUrl);
-            const imgRecord = {
-              url: fullImgUrl,
-              sourcePage: finalUrl,
-              altText: img.alt || "",
-              titleText: img.title || "",
-              status: "Discovered",
-              timestamp: new Date().toISOString()
-            };
-            discoveredImages.push(imgRecord);
-            chrome.runtime.sendMessage({ type: "IMAGE_DISCOVERED", image: imgRecord }).catch(() => {});
+            if (discoveredImages.length < 50) {
+              const imgRecord = {
+                url: fullImgUrl,
+                sourcePage: finalUrl,
+                altText: img.alt || "",
+                titleText: img.title || "",
+                status: "Discovered",
+                timestamp: new Date().toISOString()
+              };
+              discoveredImages.push(imgRecord);
+              chrome.runtime.sendMessage({ type: "IMAGE_DISCOVERED", image: imgRecord }).catch(() => {});
+            }
           }
 
           if (visitedImages.has(fullImgUrl)) continue;
@@ -1490,22 +1535,21 @@ async function runProductionCrawl(crawlState) {
             } catch {}
           }
 
-          // 2. Direct SVG vector text inspection (only for contact SVGs, max 1.5s timeout)
-          if (fullImgUrl.toLowerCase().endsWith(".svg") || fullImgUrl.includes(".svg?")) {
+          // 2. Direct SVG vector text inspection (only for contact SVGs, max 1.2s timeout)
+          if ((fullImgUrl.toLowerCase().endsWith(".svg") || fullImgUrl.includes(".svg?")) &&
+              (CONTACT_IMAGE_KEYWORD_REGEX.test(fullImgUrl) || (img.alt && CONTACT_IMAGE_KEYWORD_REGEX.test(img.alt)))) {
             visitedImages.add(fullImgUrl);
-            if (CONTACT_IMAGE_KEYWORD_REGEX.test(fullImgUrl) || (img.alt && CONTACT_IMAGE_KEYWORD_REGEX.test(img.alt))) {
-              fetch(fullImgUrl, { signal: createFetchSignal(1500), credentials: "omit" })
-                .then((r) => (r.ok ? r.text() : ""))
-                .then((svgText) => {
-                  if (svgText && svgText.includes("@")) {
-                    const svgEmails = normalizeAndExtractEmails(svgText, filterCompliance);
-                    for (const em of svgEmails) {
-                      recordCleanEmail(em, finalUrl, "image", finalUrl, { image: fullImgUrl, sourceType: "image" });
-                    }
+            fetch(fullImgUrl, { signal: createFetchSignal(1200), credentials: "omit" })
+              .then((r) => (r.ok ? r.text() : ""))
+              .then((svgText) => {
+                if (svgText && svgText.includes("@")) {
+                  const svgEmails = normalizeAndExtractEmails(svgText, filterCompliance);
+                  for (const em of svgEmails) {
+                    recordCleanEmail(em, finalUrl, "image", finalUrl, { image: fullImgUrl, sourceType: "image" });
                   }
-                })
-                .catch(() => {});
-            }
+                }
+              })
+              .catch(() => {});
             continue;
           }
 
@@ -1621,35 +1665,25 @@ async function runProductionCrawl(crawlState) {
 
       if (!task) {
         if (activeWorkersCount > 0) {
-          await new Promise((r) => setTimeout(r, 40));
+          await new Promise((r) => setTimeout(r, 50));
           continue;
         }
 
-        // Within first 2 seconds, give initialUrl time to finish and enqueue its child links
-        if (Date.now() - crawlStartTime < 2000 && visitedUrls.size === 0) {
+        // Allow at least 2.5 seconds for initialUrl and queue discovery to spin up
+        if (Date.now() - crawlStartTime < 2500) {
           await new Promise((r) => setTimeout(r, 100));
           continue;
         }
 
-        // If sitemap probe is still running within the first 4.5 seconds, wait for it before giving up
-        if (!sitemapFinished && (Date.now() - crawlStartTime < 4500)) {
-          await new Promise((r) => setTimeout(r, 100));
-          continue;
-        }
-
-        // Grace period check: 5 checks of 100ms
+        // Steady idle check: 12 checks of 100ms (1.2 seconds of sustained empty queue)
         idleWaitAttempts++;
-        if (idleWaitAttempts < 6) {
+        if (idleWaitAttempts < 12) {
           await new Promise((r) => setTimeout(r, 100));
           continue;
         }
 
         if (crawlState.aborted || allWorkCompleted) break;
-        if ((htmlQueue.length > 0 && visitedUrls.size < maxPages) || (checkPdfs && pdfQueue.length > 0)) {
-          idleWaitAttempts = 0;
-          continue;
-        }
-        if (activeWorkersCount > 0) {
+        if ((htmlQueue.length > 0 && visitedUrls.size < maxPages) || (checkPdfs && pdfQueue.length > 0) || activeWorkersCount > 0) {
           idleWaitAttempts = 0;
           continue;
         }
@@ -1693,36 +1727,8 @@ async function runProductionCrawl(crawlState) {
 
   try {
     await Promise.all(workerPromises);
-    await sitemapPromise;
   } finally {
     clearTimeout(watchdog);
-  }
-
-  // ── Sister Domain Fallback & Enrichment Probe ──────────────────────
-  const hasOnlyGenericEmail = findings.length > 0 && findings.every((f) => {
-    const d = (f.email.split("@")[1] || "").toLowerCase();
-    return /^(?:gmail|yahoo|hotmail|outlook|live|aol|qq|163|126|sina)\./i.test(d);
-  });
-  const shouldEnrich = (findings.length < 2 || hasOnlyGenericEmail) && !crawlState.aborted;
-
-  if (shouldEnrich) {
-    try {
-      await Promise.race([
-        (async () => {
-          const fallbackList = await discoverSisterDomainEmails(
-            startUrl,
-            Array.from(discoveredCompanyKeywords),
-            filterCompliance
-          );
-          for (const item of fallbackList) {
-            recordCleanEmail(item.email, item.sourceUrl, "html", item.sourceUrl, {
-              sourceType: "html"
-            });
-          }
-        })(),
-        new Promise((r) => setTimeout(r, 2000))
-      ]);
-    } catch {}
   }
 
   // Sort findings: primary target-domain emails first, followed by others ordered by frequency
